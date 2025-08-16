@@ -1,18 +1,113 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Hello World</title>
-  <link href='/style.css' rel='stylesheet'>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Meine KI-Suche</title>
+    <link href='/style.css' rel='stylesheet'>
+ <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
+ <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
 </head>
-<body> 
-  <h1>Hello, world!</h1>
-  <input type="file" id="image-upload" accept="image/png, image/jpeg">
-  <label for="image-upload" class="upload-button">Upload Image</label>
-  <img id="image-preview" src="#" alt="Image preview" style="display: none;">
+<body>
+    <div class="login-container">
+ <div class="login-blur-overlay"></div><a href="#" class="login-link">Anmelden</a>
+ </div>
+    <div class="container">
+ <div class="navigation-buttons">
+ <span class="button-back"></span>
+ <span class="button-forward"></span>
+ <span class="button-refresh"></span>
+ <span class="button-load"></span>
+ </div>
 
+        <div class="logo">Logo Placeholder</div>
+        <input type="text" class="search-bar" placeholder="Suchen oder URL eingeben">
+        <div class="buttons">
+            <button>Google-Suche</button>
+            <button>Auf gut Glück!</button>
+        </div>
+ <div class="search-options-container" style="display: none;">
+ <h3>Search Options</h3>
+ <label>
+ <input type="checkbox" id="syntax-norms"> Apply Syntax Norms
+ </label><br>
+ <label>
+ <input type="checkbox" id="physical-formulas"> Include Physical Formulas
+ </label><br>
+ <label>
+ <input type="checkbox" id="logic-option"> Specific Logic
+ </label><br>
+ <!-- More options can be added here -->
+        </div>
+ <span class="button-logic"></span>
+ <span class="button-websearch"></span>
+    </div>
+    <div class="content-area" style="display: none;">
+ <span class="button-report"></span>
+ <div class="file-manager-editor-container">
+        <h2>File Manager & 3-Tag Editor</h2>
+        <input type="file" id="file-selector" multiple>
+        <ul id="selected-files-list">
+            <!-- Selected files will be listed here -->
+        </ul>
+ <div id="uploaded-files-list">
+            <!-- Uploaded files from the server will be listed here -->
+            <div class="file-entry">
+                <span class="file-name">Placeholder File</span>
+                <select class="visibility-select">
+                    <option value="private">Private</option>
+ <option value="public">Public</option>
+                </select>
+                <span class="file-tags">Tags: tag1, tag2</span>
+                <button class="download-button">Download</button>
+                <a href="#" class="showroom-link">View</a>
+ <span class="button-upload"></span>
+ <span class="button-download"></span>
+            </div>
+ </div>
+ <div id="tag-editor-area" style="display: none;">
+            <!-- Tag editor fields for selected files -->
+ </div>
+ <div id="tag-inputs" style="display: none;">
+            <input type="text" class="tag-input" placeholder="Tag 1">
+            <input type="text" class="tag-input" placeholder="Tag 2">
+            <input type="text" class="tag-input" placeholder="Tag 3">
+        </div>
+ <button id="save-tags-button" style="display: none;">Save Tags</button>
 
+ <div id="themes-menu">
+ <h3>Themes</h3>
+ <button class="theme-option" data-theme="default">Default</button>
+ <button class="theme-option" data-theme="logic">Logic Design</button>
+ <button class="theme-option" data-theme="hv">High-Quality Visual</button>
+ </div>
+ <button id="upload-button">Upload to Google Drive</button>
+ <div id="process-status">
+            <!-- Conversion and upload progress will be displayed here -->
+ </div>
+    </div>
+    <div class="showroom-container" style="display: none;">
+ <h2>Showroom Viewer</h2>
+ <div class="showroom-layout">
+ <div class="showroom-sidebar" id="container-sidebar">
+ <!-- Container/Directory navigation will be here -->
+ <div class="container-list">
+ <h3>Containers</h3>
+ <!-- Placeholder for dynamic container list -->
+ </div>
+ </div>
+ <div class="showroom-content">
+        </div>
+ <div class="showroom-directory-nav">
+ <div class="three-d-viewer">
+            <canvas id="3d-canvas"></canvas>
+            </div>
+ <div class="image-gallery">
+ <!-- 2D images, videos, audio players will be loaded here -->
+        </div>
+    </div>
+
+    </div>
   <script defer type="text/javascript" src="/main.js"></script>
 </body>
 </html>

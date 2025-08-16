@@ -39,6 +39,20 @@
                         }
                     ]
                 }
+            ],
+            "rewrites": [
+                {
+                    "source": "/server/**",
+                    "function": "mcp"
+                }
+            ]
+        },
+        "functions": {
+            "source": ".",
+            "codebase": "default",
+            "runtime": "nodejs18",
+            "ignore": [
+                "**/.*"
             ]
         }
     },
