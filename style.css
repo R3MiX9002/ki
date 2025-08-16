@@ -1,1 +1,22 @@
 /* Add styles here */
+
+input[type="file"] {
+    display: none;
+}
+
+label {
+    display: inline-block;
+    padding: 10px 20px;
+    background-color: #007bff;
+    color: white;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+img#image-preview {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin-top: 20px;
+    border: 1px solid #ccc;
+}

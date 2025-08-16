@@ -1,0 +1,3134 @@
+#!/usr/bin/env python3
+"""
+Komplettes KI-Web-System v5.0
+- Empathischer Chatbot mit Yahoo Search Integration
+- Web-Crawler und Knowledge-Lernsystem  
+- VSCode/Python/Vue.js Coder-Integration
+- Upload/Download Server mit Datei-Management
+- PEGASUS Chatbot Embed Integration
+- Vollständige Web-Assets und API-Endpoints
+"""
+
+import os
+import sys
+import json
+import sqlite3
+import asyncio
+import aiohttp
+import aiofiles
+import threading
+import time
+import logging
+import hashlib
+import mimetypes
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, List, Optional, Any, Union
+from dataclasses import dataclass, field
+import uuid
+import shutil
+import subprocess
+import zipfile
+import requests
+from urllib.parse import urljoin, urlparse, quote_plus
+from concurrent.futures import ThreadPoolExecutor
+
+# Web Framework
+from flask import Flask, request, jsonify, render_template, send_file, redirect, url_for, session
+from flask_cors import CORS
+from flask_socketio import SocketIO, emit
+from werkzeug.utils import secure_filename
+from werkzeug.serving import make_server
+
+# Web Scraping & Processing
+try:
+    from bs4 import BeautifulSoup
+    import requests_html
+    WEB_SCRAPING_AVAILABLE = True
+except ImportError:
+    WEB_SCRAPING_AVAILABLE = False
+
+# AI & ML
+import numpy as np
+try:
+    import torch
+    import torch.nn as nn
+    AI_AVAILABLE = True
+except ImportError:
+    AI_AVAILABLE = False
+
+# Code Processing
+try:
+    import ast
+    import black
+    import autopep8
+    CODE_PROCESSING_AVAILABLE = True
+except ImportError:
+    CODE_PROCESSING_AVAILABLE = False
+
+@dataclass
+class SystemConfig:
+    """Zentrale System-Konfiguration"""
+    # Server-Einstellungen
+    host: str = "0.0.0.0"
+    port: int = 8080
+    debug: bool = True
+    
+    # Verzeichnisse
+    base_dir: Path = Path(__file__).parent
+    assets_dir: Path = base_dir / "assets"
+    uploads_dir: Path = base_dir / "uploads" 
+    downloads_dir: Path = base_dir / "downloads"
+    data_dir: Path = base_dir / "data"
+    code_projects_dir: Path = base_dir / "code_projects"
+    
+    # Datenbank
+    database_path: str = "ai_system.db"
+    
+    # API-Keys und Integrationen
+    yahoo_search_enabled: bool = True
+    pegasus_config: Dict = field(default_factory=lambda: {
+        "key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjaGF0Ym90X2lkIjoiY21lZDU2anY1MDAweXU1YWNjdTVzY3NyYyIsInVzZXJfaWQiOiJjbWVkNTQyaGwwMDB3dTVhY2swb3hzMXc4IiwiaWF0IjoxNzU1Mjg0MDI4LCJleHAiOjE3NTc4NzYwMjh9.ufQTK9ecYVOtHS9PMbMcv357bja14s2HMl_vxXI9iz8"
+    })
+    
+    # Upload-Einstellungen
+    max_upload_size: int = 50 * 1024 * 1024  # 50MB
+    allowed_extensions: set = field(default_factory=lambda: {
+        'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'doc', 'docx', 
+        'py', 'js', 'vue', 'html', 'css', 'json', 'xml', 'zip'
+    })
+    
+    def __post_init__(self):
+        """Erstellt notwendige Verzeichnisse"""
+        for directory in [self.assets_dir, self.uploads_dir, self.downloads_dir, 
+                         self.data_dir, self.code_projects_dir]:
+            directory.mkdir(exist_ok=True)
+
+class DatabaseManager:
+    """Erweiterte Datenbank-Verwaltung"""
+    
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self.init_database()
+    
+    def init_database(self):
+        """Initialisiert erweiterte Datenbank-Struktur"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Chat-Verlauf
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                session_data TEXT,
+                is_active BOOLEAN DEFAULT 1
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                message_type TEXT,  -- 'user', 'ai', 'system'
+                content TEXT,
+                metadata TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (session_id) REFERENCES chat_sessions (id)
+            )
+        ''')
+        
+        # Web-Crawling Ergebnisse
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS crawled_content (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT UNIQUE,
+                title TEXT,
+                content TEXT,
+                content_hash TEXT,
+                crawl_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_type TEXT,
+                quality_score REAL DEFAULT 0.0,
+                tags TEXT
+            )
+        ''')
+        
+        # Code-Projekte
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS code_projects (
+                id TEXT PRIMARY KEY,
+                project_name TEXT,
+                project_type TEXT,  -- 'python', 'vue', 'mixed'
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                project_data TEXT,
+                file_structure TEXT
+            )
+        ''')
+        
+        # Datei-Uploads
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS uploaded_files (
+                id TEXT PRIMARY KEY,
+                original_filename TEXT,
+                stored_filename TEXT,
+                file_size INTEGER,
+                mime_type TEXT,
+                upload_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                download_count INTEGER DEFAULT 0,
+                is_public BOOLEAN DEFAULT 0,
+                metadata TEXT
+            )
+        ''')
+        
+        # Knowledge Base
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS knowledge_base (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic TEXT,
+                content TEXT,
+                source_url TEXT,
+                confidence_score REAL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                tags TEXT,
+                is_verified BOOLEAN DEFAULT 0
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+    
+    def execute_query(self, query: str, params: tuple = ()) -> List[tuple]:
+        """Führt SQL-Query aus und gibt Ergebnisse zurück"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        
+        if query.strip().upper().startswith('SELECT'):
+            results = cursor.fetchall()
+        else:
+            results = []
+            conn.commit()
+        
+        conn.close()
+        return results
+    
+    def save_chat_message(self, session_id: str, message_type: str, content: str, metadata: dict =                         'content': f'[Fehler beim Lesen: {e}]',
+                        'size': file_path.stat().st_size,
+                        'modified': datetime.fromtimestamp(file_path.stat().st_mtime).isoformat()
+                    }
+        
+        return {
+            'project_info': project_info,
+            'files': files,
+            'file_structure': project_data[0][1]
+        }
+    
+    def save_file_content(self, project_id: str, file_path: str, content: str) -> Dict:
+        """Speichert Dateiinhalt"""
+        project_data = self.db_manager.execute_query(
+            "SELECT project_data FROM code_projects WHERE id = ?",
+            (project_id,)
+        )
+        
+        if not project_data:
+            return {'error': 'Projekt nicht gefunden'}
+        
+        project_info = json.loads(project_data[0][0])
+        full_path = Path(project_info['path']) / file_path
+        
+        try:
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Formatiere Code falls Python
+            if full_path.suffix == '.py' and CODE_PROCESSING_AVAILABLE:
+                try:
+                    content = black.format_str(content, mode=black.FileMode())
+                except:
+                    pass  # Falls Black-Formatierung fehlschlägt, verwende Original
+            
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            # Update last_modified in Datenbank
+            self.db_manager.execute_query(
+                "UPDATE code_projects SET last_modified = CURRENT_TIMESTAMP WHERE id = ?",
+                (project_id,)
+            )
+            
+            return {'success': True, 'file_path': str(full_path)}
+            
+        except Exception as e:
+            return {'error': f'Fehler beim Speichern: {str(e)}'}
+
+class FileUploadDownloadManager:
+    """Upload/Download Server Manager"""
+    
+    def __init__(self, config: SystemConfig, db_manager: DatabaseManager):
+        self.config = config
+        self.db_manager = db_manager
+        
+    def allowed_file(self, filename: str) -> bool:
+        """Prüft ob Dateierweiterung erlaubt ist"""
+        return '.' in filename and \
+               filename.rsplit('.', 1)[1].lower() in self.config.allowed_extensions
+    
+    def upload_file(self, file, is_public: bool = False) -> Dict:
+        """Upload-Datei verarbeiten"""
+        if not file or file.filename == '':
+            return {'error': 'Keine Datei ausgewählt'}
+        
+        if not self.allowed_file(file.filename):
+            return {'error': 'Dateierweiterung nicht erlaubt'}
+        
+        # Sichere Dateiname generieren
+        original_filename = secure_filename(file.filename)
+        file_id = str(uuid.uuid4())
+        file_extension = original_filename.rsplit('.', 1)[1].lower() if '.' in original_filename else ''
+        stored_filename = f"{file_id}.{file_extension}" if file_extension else file_id
+        
+        file_path = self.config.uploads_dir / stored_filename
+        
+        try:
+            # Datei-Größe prüfen
+            file.seek(0, 2)  # Gehe zum Ende
+            file_size = file.tell()
+            file.seek(0)  # Zurück zum Anfang
+            
+            if file_size > self.config.max_upload_size:
+                return {'error': f'Datei zu groß (max. {self.config.max_upload_size // (1024*1024)}MB)'}
+            
+            # Datei speichern
+            file.save(str(file_path))
+            
+            # MIME-Type bestimmen
+            mime_type, _ = mimetypes.guess_type(original_filename)
+            mime_type = mime_type or 'application/octet-stream'
+            
+            # Metadaten sammeln
+            metadata = {
+                'file_extension': file_extension,
+                'upload_ip': 'unknown',  # Könnte aus Request geholt werden
+                'is_image': mime_type.startswith('image/'),
+                'is_code': file_extension in {'py', 'js', 'vue', 'html', 'css', 'json'}
+            }
+            
+            # In Datenbank speichern
+            self.db_manager.execute_query(
+                """INSERT INTO uploaded_files 
+                   (id, original_filename, stored_filename, file_size, mime_type, is_public, metadata)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (file_id, original_filename, stored_filename, file_size, mime_type, is_public, json.dumps(metadata))
+            )
+            
+            return {
+                'file_id': file_id,
+                'original_filename': original_filename,
+                'file_size': file_size,
+                'download_url': f'/download/{file_id}',
+                'success': True
+            }
+            
+        except Exception as e:
+            # Cleanup bei Fehler
+            if file_path.exists():
+                file_path.unlink()
+            
+            return {'error': f'Upload fehlgeschlagen: {str(e)}'}
+    
+    def get_file_info(self, file_id: str) -> Optional[Dict]:
+        """Holt Datei-Informationen"""
+        result = self.db_manager.execute_query(
+            """SELECT original_filename, stored_filename, file_size, mime_type, 
+                      upload_timestamp, download_count, is_public, metadata
+               FROM uploaded_files WHERE id = ?""",
+            (file_id,)
+        )
+        
+        if not result:
+            return             border-radius: 10px;
+        }
+        .user-message {
+            background: #007bff;
+            color: white;
+            text-align: right;
+            margin-left: 50px;
+        }
+        .ai-message {
+            background: #ffffff;
+            color: #333;
+            margin-right: 50px;
+            border-left: 4px solid #28a745;
+        }
+        .system-message {
+            background: #fff3cd;
+            color: #856404;
+            text-align: center;
+            font-style: italic;
+        }
+        .code-editor {
+            height: 400px;
+            border: 1px solid #ccc;
+        }
+        .file-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .upload-zone {
+            border: 2px dashed #ccc;
+            padding: 40px;
+            text-align: center;
+            margin: 20px 0;
+            transition: all 0.3s;
+        }
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: #007bff;
+            background: #f8f9fa;
+        }
+        .search-results {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .navbar-brand {
+            font-weight: bold;
+            background: linear-gradient(45deg, #007bff, #28a745);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+    </style>
+    {% block extra_css %}{% endblock %}
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container">
+            <a class="navbar-brand" href="/">
+                <i class="fas fa-robot me-2"></i>KI-System v5.0
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav me-auto">
+                    <li class="nav-item">
+                        <a class="nav-link" href="/"><i class="fas fa-home me-1"></i>Start</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/chat"><i class="fas fa-comments me-1"></i>Chat</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/code-assistant"><i class="fas fa-code me-1"></i>Code-Assistent</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/file-manager"><i class="fas fa-folder me-1"></i>Datei-Manager</a>
+                    </li>
+                </ul>
+                <ul class="navbar-nav">
+                    <li class="nav-item">
+                        <span class="navbar-text">
+                            <i class="fas fa-brain me-1"></i>Empathische KI
+                        </span>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="container mt-4">
+        {% block content %}{% endblock %}
+    </div>
+
+    <!-- PEGASUS Integration -->
+    <script>
+        window.PEGASUS_CONFIG = {{ pegasus_config | tojsonfilter | safe }};
+    </script>
+    <script src="https://www.mcanswers.ai/scripts/embed.js"></script>
+
+    <!-- Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
+    {% block extra_js %}{% endblock %}
+</body>
+</html>'''
+    
+    (templates_dir / "base.html").write_text(base_template)
+    
+    # Hauptseite
+    index_template = '''{% extends "base.html" %}
+
+{% block title %}KI-System v5.0 - Startseite{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="jumbotron bg-gradient text-white p-5 rounded" style="background: linear-gradient(135deg, #007bff, #28a745);">
+            <h1 class="display-4"><i class="fas fa-robot me-3"></i>Willkommen zum KI-System v5.0</h1>
+            <p class="lead">
+                Empathischer Chatbot • Web-Crawler • Code-Assistent • Datei-Manager
+            </p>
+            <hr class="my-4">
+            <p>
+                Ein vollständiges KI-System mit Yahoo-Suche, intelligenten Lern-Algorithmen,
+                VSCode/Python/Vue.js Integration und PEGASUS Chatbot-Unterstützung.
+            </p>
+            <a class="btn btn-light btn-lg" href="/chat" role="button">
+                <i class="fas fa-comments me-2"></i>Chat starten
+            </a>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-5">
+    <div class="col-md-6 col-lg-3 mb-4">
+        <div class="card h-100 border-primary">
+            <div class="card-body text-center">
+                <i class="fas fa-comments fa-3x text-primary mb-3"></i>
+                <h5 class="card-title">Empathischer Chat</h5>
+                <p class="card-text">
+                    Intelligente Gespräche mit Yahoo-Suche Integration und emotionalem Verständnis.
+                </p>
+                <a href="/chat" class="btn btn-primary">Chat öffnen</a>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-6 col-lg-3 mb-4">
+        <div class="card h-100 border-success">
+            <div class="card-body text-center">
+                <i class="fas fa-code fa-3x text-success mb-3"></i>
+                <h5 class="card-title">Code-Assistent</h5>
+                <p class="card-text">
+                    Python, Vue.js und Mixed-Projekte erstellen, bearbeiten und verwalten.
+                </p>
+                <a href="/code-assistant" class="btn btn-success">Code-Editor</a>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-6 col-lg-3 mb-4">
+        <div class="card h-100 border-info">
+            <div class="card-body text-center">
+                <i class="fas fa-folder fa-3x text-info mb-3"></i>
+                <h5 class="card-title">Datei-Manager</h5>
+                <p class="card-text">
+                    Upload, Download und Verwaltung von Dateien mit intelligenter Kategorisierung.
+                </p>
+                <a href="/file-manager" class="btn btn-info">Dateien verwalten</a>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-6 col-lg-3 mb-4">
+        <div class="card h-100 border-warning">
+            <div class="card-body text-center">
+                <i class="fas fa-search fa-3x text-warning mb-3"></i>
+                <h5 class="card-title">Web-Crawler</h5>
+                <p class="card-text">
+                    Automatisches Lernen aus Web-Inhalten mit Yahoo-Suche und Knowledge-Extraktion.
+                </p>
+                <button class="btn btn-warning" onclick="triggerLearning()">Lernen starten</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-5">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5><i class="fas fa-info-circle me-2"></i>System-Features</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <h6>🤖 KI-Funktionen:</h6>
+                        <ul>
+                            <li>Empathische Gesprächsführung</li>
+                            <li>Yahoo Web-Suche Integration</li>
+                            <li>Automatisches Knowledge-Learning</li>
+                            <li>Web-Crawling und Content-Extraktion</li>
+                        </ul>
+                    </div>
+                    <div class="col-md-6">
+                        <h6>💻 Entwickler-Tools:</h6>
+                        <ul>
+                            <li>Python-Projekt-Generator</li>
+                            <li>Vue.js-Anwendungs-Boilerplate</li>
+                            <li>Integrierte Code-Formatierung</li>
+                            <li>Upload/Download-Server</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+async function triggerLearning() {
+    try {
+        const response = await fetch('/api/learn', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({max_items: 20})
+        });
+        const result = await response.json();
+        
+        alert(`Lernen abgeschlossen! ${result.learning_result.extracted_knowledge} neue Wissenselemente gelernt.`);
+    } catch (error) {
+        alert('Fehler beim Lernen: ' + error.message);
+    }
+}
+</script>
+{% endblock %}'''
+    
+    (templates_dir / "index.html").write_text(index_template)
+    
+    # Chat-Seite
+    chat_template = '''{% extends "base.html" %}
+
+{% block title %}Empathischer Chat - KI-System{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5><i class="fas fa-comments me-2"></i>Empathischer KI-Chat</h5>
+                <button class="btn btn-outline-primary btn-sm" onclick="newChatSession()">
+                    <i class="fas fa-plus me-1"></i>Neuer Chat
+                </button>
+            </div>
+            <div class="card-body p-0">
+                <!-- Chat-Verlauf -->
+                <div id="chat-container" class="chat-container">
+                    <div class="message system-message">
+                        <i class="fas fa-robot me-2"></i>
+                        Willkommen! Ich bin Ihr empathischer KI-Begleiter. 
+                        Ich kann Ihnen bei Fragen helfen, Web-Recherchen durchführen und aus neuen Inhalten lernen.
+                        <br><small>Wie kann ich Ihnen heute helfen?</small>
+                    </div>
+                </div>
+                
+                <!-- Chat-Eingabe -->
+                <div class="p-3 border-top">
+                    <div class="input-group">
+                        <textarea 
+                            id="message-input" 
+                            class="form-control" 
+                            placeholder="Ihre Nachricht hier eingeben..." 
+                            rows="2"
+                            onkeypress="handleKeyPress(event)"></textarea>
+                        <button class="btn btn-primary" onclick="sendMessage()">
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
+                    </div>
+                    <small class="text-muted">
+                        <i class="fas fa-lightbulb me-1"></i>
+                        Tipp: Fragen Sie nach allem - ich durchsuche das Web und lerne dazu!
+                    </small>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-4">
+        <!-- Chat-Einstellungen -->
+        <div class="card mb-3">
+            <div class="card-header">
+                <h6><i class="fas fa-cog me-2"></i>Chat-Einstellungen</h6>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label class="form-label">Session ID:</label>
+                    <input type="text" id="session-id" class="form-control" readonly>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="auto-scroll" checked>
+                    <label class="form-check-label" for="auto-scroll">
+                        Auto-Scroll
+                    </label>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="web-search" checked>
+                    <label class="form-check-label" for="web-search">
+                        Web-Suche aktiviert
+                    </label>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Chat-Statistiken -->
+        <div class="card">
+            <div class="card-header">
+                <h6><i class="fas fa-chart-line me-2"></i>Session-Info</h6>
+            </div>
+            <div class="card-body">
+                <div class="row text-center">
+                    <div class="col-6">
+                        <div class="h4 text-primary" id="message-count">0</div>
+                        <small>Nachrichten</small>
+                    </div>
+                    <div class="col-6">
+                        <div class="h4 text-success" id="search-count">0</div>
+                        <small>Suchen</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- WebSocket Status -->
+<div class="position-fixed bottom-0 end-0 p-3">
+    <div id="connection-status" class="badge bg-secondary">
+        <i class="fas fa-circle me-1"></i>Verbinde...
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let currentSessionId = null;
+let messageCount = 0;
+let searchCount = 0;
+let socket = null;
+
+// WebSocket Verbindung
+function initWebSocket() {
+    socket = io();
+    
+    socket.on('connect', function() {
+        document.getElementById('connection-status').innerHTML = 
+            '<i class="fas fa-circle text-success me-1"></i>Verbunden';
+        document.getElementById('connection-status').className = 'badge bg-success';
+    });
+    
+    socket.on('disconnect', function() {
+        document.getElementById('connection-status').innerHTML = 
+            '<i class="fas fa-circle text-danger me-1"></i>Getrennt';
+        document.getElementById('connection-status').className = 'badge bg-danger';
+    });
+    
+    socket.on('chat_response', function(response) {
+        displayAIResponse(response);
+    });
+}
+
+// Neue Chat-Session erstellen
+async function newChatSession() {
+    try {
+        const response = await fetch('/api/chat/session', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({})
+        });
+        
+        const result = await response.json();
+        currentSessionId = result.session_id;
+        document.getElementById('session-id').value = currentSessionId;
+        
+        // Chat-Container leeren
+        const container = document.getElementById('chat-container');
+        container.innerHTML = `
+            <div class="message system-message">
+                <i class="fas fa-robot me-2"></i>
+                Neue Chat-Session gestartet! Session ID: ${currentSessionId}
+                <br><small>Ich bin bereit für Ihre Fragen.</small>
+            </div>
+        `;
+        
+        messageCount = 0;
+        searchCount = 0;
+        updateStats();
+        
+    } catch (error) {
+        console.error('Fehler beim Erstellen der Chat-Session:', error);
+        alert('Fehler beim Erstellen einer neuen Chat-Session');
+    }
+}
+
+// Nachricht senden
+async function sendMessage() {
+    const messageInput = document.getElementById('message-input');
+    const message = messageInput.value.trim();
+    
+    if (!message) return;
+    
+    if (!currentSessionId) {
+        await newChatSession();
+    }
+    
+    // Zeige User-Nachricht
+    displayUserMessage(message);
+    messageInput.value = '';
+    messageCount++;
+    updateStats();
+    
+    // Sende über WebSocket oder HTTP
+    if (socket && socket.connected) {
+        socket.emit('chat_message', {
+            session_id: currentSessionId,
+            message: message
+        });
+    } else {
+        // Fallback: HTTP Request
+        try {
+            const response = await fetch('/api/chat/message', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    session_id: currentSessionId,
+                    message: message
+                })
+            });
+            
+            const result = await response.json();
+            displayAIResponse(result);
+            
+        } catch (error) {
+            displayErrorMessage('Verbindungsfehler: ' + error.message);
+        }
+    }
+}
+
+// User-Nachricht anzeigen
+function displayUserMessage(message) {
+    const container = document.getElementById('chat-container');
+    const messageDiv = document.createElement('div');
+    messageDiv.className = 'message user-message';
+    messageDiv.innerHTML = `
+        <small class="d-block mb-1">${new Date().toLocaleTimeString()}</small>
+        ${escapeHtml(message)}
+    `;
+    container.appendChild(messageDiv);
+    
+    if (document.getElementById('auto-scroll').checked) {
+        container.scrollTop = container.scrollHeight;
+    }
+}
+
+// AI-Antwort anzeigen
+function displayAIResponse(response) {
+    const container = document.getElementById('chat-container');
+    const messageDiv = document.createElement('div');
+    messageDiv.className = 'message ai-message';
+    
+    let content = `<small class="d-block mb-2 text-muted">
+        <i class="fas fa-robot me-1"></i>KI-Begleiter • ${new Date().toLocaleTimeString()}`;
+    
+    // Aktionen anzeigen
+    if (response.actions_performed && response.actions_performed.length > 0) {
+        const actions = response.actions_performed.map(action => {
+            const actionIcons = {
+                'web_search': '<i class="fas fa-search"></i> Web-Suche',
+                'web_crawling': '<i class="fas fa-spider"></i> Crawling',
+                'knowledge_learning': '<i class="fas fa-brain"></i> Lernen'
+            };
+            return actionIcons[action] || action;
+        });
+        content += ` • ${actions.join(' • ')}`;
+        
+        if (response.actions_performed.includes('web_search')) {
+            searchCount++;
+            updateStats();
+        }
+    }
+    
+    content += `</small>`;
+    content += formatMessage(response.content);
+    
+    // Such-Ergebnisse anzeigen
+    if (response.search_results && response.search_results.length > 0) {
+        content += `<div class="mt-3"><small class="text-muted">
+            <i class="fas fa-external-link-alt me-1"></i>
+            ${response.search_results.length} Quelle(n) gefunden
+        </small></div>`;
+    }
+    
+    messageDiv.innerHTML = content;
+    container.appendChild(messageDiv);
+    
+    if (document.getElementById('auto-scroll').checked) {
+        container.scrollTop = container.scrollHeight;
+    }
+}
+
+// Fehler-Nachricht anzeigen
+function displayErrorMessage(message) {
+    const container = document.getElementById('chat-container');
+    const messageDiv = document.createElement('div');
+    messageDiv.className = 'message system-message';
+    messageDiv.innerHTML = `
+        <i class="fas fa-exclamation-triangle me-2"></i>
+        <strong>Fehler:</strong> ${escapeHtml(message)}
+    `;
+    container.appendChild(messageDiv);
+    
+    if (document.getElementById('auto-scroll').checked) {
+        container.scrollTop = container.scrollHeight;
+    }
+}
+
+// Statistiken aktualisieren
+function updateStats() {
+    document.getElementById('message-count').textContent = messageCount;
+    document.getElementById('search-count').textContent = searchCount;
+}
+
+// Message formatieren (Markdown-like)
+function formatMessage(message) {
+    return message
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.*?)\*/g, '<em>$1</em>')
+        .replace(/`(.*?)`/g, '<code>$1</code>')
+        .replace(/\n/g, '<br>')
+        .replace(/🔗 \[(.*?)\]\((.*?)\)/g, '<a href="$2" target="_blank" class="text-decoration-none">🔗 $1</a>');
+}
+
+// HTML escapen
+function escapeHtml(text) {
+    const map = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;'
+    };
+    
+    return text.replace(/[&<>"']/g, function(m) { return map[m]; });
+}
+
+// Enter-Taste Handler
+function handleKeyPress(event) {
+    if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        sendMessage();
+    }
+}
+
+// Initialisierung
+document.addEventListener('DOMContentLoaded', function() {
+    initWebSocket();
+    newChatSession();
+});
+</script>
+{% endblock %}'''
+    
+    (templates_dir / "chat.html").write_text(chat_template)
+    
+    # Code-Assistent Seite  
+    code_assistant_template = '''{% extends "base.html" %}
+
+{% block title %}Code-Assistent - KI-System{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-3">
+        <!-- Projekt-Liste -->
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h6><i class="fas fa-project-diagram me-2"></i>Projekte</h6>
+                <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#newProjectModal">
+                    <i class="fas fa-plus"></i>
+                </button>
+            </div>
+            <div class="card-body p-0">
+                <div id="projects-list" class="list-group list-group-flush">
+                    <div class="text-center p-3 text-muted">
+                        <i class="fas fa-spinner fa-spin"></i> Lade Projekte...
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-6">
+        <!-- Code-Editor -->
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h6><i class="fas fa-code me-2"></i>Code-Editor</h6>
+                <div class="btn-group btn-group-sm">
+                    <button class="btn btn-outline-success" onclick="saveCurrentFile()" title="Speichern">
+                        <i class="fas fa-save"></i>
+                    </button>
+                    <button class="btn btn-outline-info" onclick="formatCode()" title="Code formatieren">
+                        <i class="fas fa-magic"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                <textarea id="code-editor" class="form-control code-editor" placeholder="Wählen Sie ein Projekt und eine Datei zum Bearbeiten..."></textarea>
+            </div>
+            <div class="card-footer">
+                <small class="text-muted" id="editor-status">Bereit</small>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3">
+        <!-- Datei-Browser -->
+        <div class="card">
+            <div class="card-header">
+                <h6><i class="fas fa-folder-open me-2"></i>Dateien</h6>
+            </div>
+            <div class="card-body p-0">
+                <div id="file-browser" class="file-list">
+                    <div class="text-center p-3 text-muted">
+                        Wählen Sie ein Projekt
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Projekt-Info -->
+        <div class="card mt-3">
+            <div class="card-header">
+                <h6><i class="fas fa-info-circle me-2"></i>Projekt-Info</h6>
+            </div>
+            <div class="card-body">
+                <div id="project-info">
+                    <small class="text-muted">Kein Projekt ausgewählt</small>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Neues Projekt Modal -->
+<div class="modal fade" id="newProjectModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-plus me-2"></i>Neues Projekt
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="new-project-form">
+                    <div class="mb-3">
+                        <label class="form-label">Projekt-Name</label>
+                        <input type="text" class="form-control" id="project-name" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Projekt-Typ</label>
+                        <select class="form-select" id="project-type" required>
+                            <option value="">Typ wählen...</option>
+                            <option value="python">🐍 Python Projekt</option>
+                            <option value="vue">🌟 Vue.js Anwendung</option>
+                            <option value="mixed">🔀 Mixed (Python + Vue)</option>
+                        </select>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Abbrechen</button>
+                <button type="button" class="btn btn-primary" onclick="createNewProject()">
+                    <i class="fas fa-plus me-1"></i>Projekt erstellen
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let currentProject = null;
+let currentFile = null;
+let projects = [];
+
+// Projekte laden
+async function loadProjects() {
+    try {
+        const response = await fetch('/api/projects');
+        const result = await response.json();
+        projects = result.projects;
+        displayProjects();
+    } catch (error) {
+        console.error('Fehler beim Laden der Projekte:', error);
+        document.getElementById('projects-list').innerHTML = 
+            '<div class="text-center p-3 text-danger">Fehler beim Laden</div>';
+    }
+}
+
+// Projekte anzeigen
+function displayProjects() {
+    const container = document.getElementById('projects-list');
+    
+    if (projects.length === 0) {
+        container.innerHTML = `
+            <div class="text-center p-3 text-muted">
+                <i class="fas fa-folder-plus mb-2 d-block"></i>
+                Noch keine Projekte vorhanden
+            </div>
+        `;
+        return;
+    }
+    
+    container.innerHTML = projects.map(project => `
+        <div class="list-group-item list-group-item-action" onclick="selectProject('${project.id}')">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <h6 class="mb-1">
+                        ${getProjectIcon(project.type)} ${project.name}
+                    </h6>
+                    <small class="text-muted">${project.type}</small>
+                </div>
+                <small class="text-muted">${formatDate(project.last_modified)}</small>
+            </div>
+        </div>
+    `).join('');
+}
+
+// Projekt-Icon
+function getProjectIcon(type) {
+    const icons = {
+        'python': '🐍',
+        'vue': '🌟',
+        'mixed': '🔀'
+    };
+    return icons[type] || '📁';
+}
+
+// Datum formatieren
+function formatDate(dateString) {
+    return new Date(dateString).toLocaleDateString('de-DE');
+}
+
+// Projekt auswählen
+async function selectProject(projectId) {
+    try {
+        currentProject = projects.find(p => p.id === projectId);
+        
+        // Projekt-Info aktualisieren
+        document.getElementById('project-info').innerHTML = `
+            <h6>${getProjectIcon(currentProject.type)} ${currentProject.name}</h6>
+            <p class="mb-1"><strong>Typ:</strong> ${currentProject.type}</p>
+            <p class="mb-1"><strong>Erstellt:</strong> ${formatDate(currentProject.created_at)}</p>
+            <p class="mb-0"><strong>Geändert:</strong> ${formatDate(currentProject.last_modified)}</p>
+        `;
+        
+        // Dateien laden
+        const response = await fetch(`/api/projects/${projectId}/files`);
+        const result = await response.json();
+        
+        if (result.error) {
+            throw new Error(result.error);
+        }
+        
+        displayFiles(result.files);
+        
+        // Markiere aktives Projekt
+        document.querySelectorAll('#projects-list .list-group-item').forEach(item => {
+            item.classList.
+        
+        row = result[0]
+        return {
+            'file_id': file_id,
+            'original_filename': row[0],
+            'stored_filename': row[1],
+            'file_size': row[2],
+            'mime_type': row[3],
+            'upload_timestamp': row[4],
+            'download_count': row[5],
+            'is_public': bool(row[6]),
+            'metadata': json.loads(row[7]) if row[7] else {}
+        }
+    
+    def increment_download_count(self, file_id: str):
+        """Erhöht Download-Zähler"""
+        self.db_manager.execute_query(
+            "UPDATE uploaded_files SET download_count = download_count + 1 WHERE id = ?",
+            (file_id,)
+        )
+    
+    def list_public_files(self, limit: int = 50) -> List[Dict]:
+        """Listet öffentliche Dateien"""
+        results = self.db_manager.execute_query(
+            """SELECT id, original_filename, file_size, mime_type, upload_timestamp, download_count
+               FROM uploaded_files 
+               WHERE is_public = 1 
+               ORDER BY upload_timestamp DESC 
+               LIMIT ?""",
+            (limit,)
+        )
+        
+        return [
+            {
+                'file_id': row[0],
+                'original_filename': row[1],
+                'file_size': row[2],
+                'mime_type': row[3],
+                'upload_timestamp': row[4],
+                'download_count': row[5],
+                'download_url': f'/download/{row[0]}'
+            }
+            for row in results
+        ]
+
+class EmpathicChatBot:
+    """Empathischer Chatbot mit integrierter Suche"""
+    
+    def __init__(self, db_manager: DatabaseManager, search_engine: YahooSearchEngine, 
+                 crawler: WebCrawler, knowledge_learner: KnowledgeLearner):
+        self.db_manager = db_manager
+        self.search_engine = search_engine
+        self.crawler = crawler
+        self.knowledge_learner = knowledge_learner
+        self.active_sessions = {}
+        
+    def create_chat_session(self, user_id: str =             item.classList.remove('active');
+        });
+        event.target.classList.add('active');
+        
+    } catch (error) {
+        console.error('Fehler beim Laden des Projekts:', error);
+        alert('Fehler beim Laden des Projekts: ' + error.message);
+    }
+}
+
+// Dateien anzeigen
+function displayFiles(files) {
+    const container = document.getElementById('file-browser');
+    
+    if (Object.keys(files).length === 0) {
+        container.innerHTML = '<div class="text-center p-3 text-muted">Keine Dateien gefunden</div>';
+        return;
+    }
+    
+    container.innerHTML = Object.keys(files).map(filePath => `
+        <div class="list-group-item list-group-item-action p-2" onclick="loadFile('${filePath}')">
+            <small>
+                ${getFileIcon(filePath)} ${filePath}
+                <div class="text-muted">${formatFileSize(files[filePath].size)}</div>
+            </small>
+        </div>
+    `).join('');
+}
+
+// Datei-Icon
+function getFileIcon(filePath) {
+    const ext = filePath.split('.').pop().toLowerCase();
+    const icons = {
+        'py': '🐍',
+        'js': '📜',
+        'vue': '🌟',
+        'html': '🌐',
+        'css': '🎨',
+        'json': '📋',
+        'md': '📝',
+        'txt': '📄'
+    };
+    return icons[ext] || '📄';
+}
+
+// Dateigröße formatieren
+function formatFileSize(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+// Datei laden
+async function loadFile(filePath) {
+    if (!currentProject) {
+        alert('Bitte wählen Sie zuerst ein Projekt aus');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`/api/projects/${currentProject.id}/files`);
+        const result = await response.json();
+        
+        if (result.files && result.files[filePath]) {
+            currentFile = filePath;
+            document.getElementById('code-editor').value = result.files[filePath].content;
+            document.getElementById('editor-status').textContent = `Datei: ${filePath}`;
+            
+            // Markiere aktive Datei
+            document.querySelectorAll('#file-browser .list-group-item').forEach(item => {
+                item.classList.remove('active');
+            });
+            event.target.classList.add('active');
+        }
+        
+    } catch (error) {
+        console.error('Fehler beim Laden der Datei:', error);
+        alert('Fehler beim Laden der Datei: ' + error.message);
+    }
+}
+
+// Datei speichern
+async function saveCurrentFile() {
+    if (!currentProject || !currentFile) {
+        alert('Keine Datei zum Speichern ausgewählt');
+        return;
+    }
+    
+    try {
+        const content = document.getElementById('code-editor').value;
+        
+        const response = await fetch(`/api/projects/${currentProject.id}/files/${currentFile}`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({content: content})
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            document.getElementById('editor-status').textContent = `✅ ${currentFile} gespeichert`;
+            setTimeout(() => {
+                document.getElementById('editor-status').textContent = `Datei: ${currentFile}`;
+            }, 2000);
+        } else {
+            throw new Error(result.error);
+        }
+        
+    } catch (error) {
+        console.error('Fehler beim Speichern:', error);
+        alert('Fehler beim Speichern: ' + error.message);
+    }
+}
+
+// Code formatieren (vereinfacht)
+function formatCode() {
+    if (!currentFile) {
+        alert('Keine Datei ausgewählt');
+        return;
+    }
+    
+    const editor = document.getElementById('code-editor');
+    let content = editor.value;
+    
+    // Einfache Python-Formatierung
+    if (currentFile.endsWith('.py')) {
+        // Entferne überschüssige Leerzeilen
+        content = content.replace(/\n\s*\n\s*\n/g, '\n\n');
+        // Füge Leerzeilen nach Funktionsdefinitionen hinzu
+        content = content.replace(/def\s+\w+.*?:\n(?!\s)/g, match => match + '\n');
+    }
+    
+    // Einfache JSON-Formatierung
+    if (currentFile.endsWith('.json')) {
+        try {
+            const parsed = JSON.parse(content);
+            content = JSON.stringify(parsed, null, 2);
+        } catch (e) {
+            alert('Ungültiges JSON');
+            return;
+        }
+    }
+    
+    editor.value = content;
+    document.getElementById('editor-status').textContent = '✨ Code formatiert';
+    setTimeout(() => {
+        document.getElementById('editor-status').textContent = `Datei: ${currentFile}`;
+    }, 2000);
+}
+
+// Neues Projekt erstellen
+async function createNewProject() {
+    const name = document.getElementById('project-name').value.trim();
+    const type = document.getElementById('project-type').value;
+    
+    if (!name || !type) {
+        alert('Bitte füllen Sie alle Felder aus');
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/projects', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({name: name, type: type})
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            // Modal schließen
+            const modal = bootstrap.Modal.getInstance(document.getElementById('newProjectModal'));
+            modal.hide();
+            
+            // Form zurücksetzen
+            document.getElementById('new-project-form').reset();
+            
+            // Projekte neu laden
+            await loadProjects();
+            
+            alert(`Projekt "${name}" erfolgreich erstellt!`);
+        } else {
+            throw new Error(result.error);
+        }
+        
+    } catch (error) {
+        console.error('Fehler beim Erstellen des Projekts:', error);
+        alert('Fehler beim Erstellen des Projekts: ' + error.message);
+    }
+}
+
+// Keyboard Shortcuts
+document.addEventListener('keydown', function(event) {
+    // Ctrl+S für Speichern
+    if (event.ctrlKey && event.key === 's') {
+        event.preventDefault();
+        saveCurrentFile();
+    }
+    
+    // Ctrl+Alt+F für Formatieren
+    if (event.ctrlKey && event.altKey && event.key === 'f') {
+        event.preventDefault();
+        formatCode();
+    }
+});
+
+// Initialisierung
+document.addEventListener('DOMContentLoaded', function() {
+    loadProjects();
+});
+</script>
+{% endblock %}'''
+    
+    (templates_dir / "code_assistant.html").write_text(code_assistant_template)
+    
+    # Datei-Manager Seite
+    file_manager_template = '''{% extends "base.html" %}
+
+{% block title %}Datei-Manager - KI-System{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-6">
+        <!-- Upload-Bereich -->
+        <div class="card">
+            <div class="card-header">
+                <h5><i class="fas fa-cloud-upload-alt me-2"></i>Datei-Upload</h5>
+            </div>
+            <div class="card-body">
+                <!-- Drag & Drop Zone -->
+                <div id="upload-zone" class="upload-zone" 
+                     ondrop="dropHandler(event)" 
+                     ondragover="allowDrop(event)"
+                     ondragenter="dragEnter(event)"
+                     ondragleave="dragLeave(event)">
+                    <i class="fas fa-cloud-upload-alt fa-3x text-muted mb-3"></i>
+                    <p class="mb-3">Dateien hier hinziehen oder klicken zum Auswählen</p>
+                    <input type="file" id="file-input" multiple class="d-none" onchange="handleFiles(this.files)">
+                    <button class="btn btn-outline-primary" onclick="document.getElementById('file-input').click()">
+                        <i class="fas fa-folder-open me-2"></i>Dateien auswählen
+                    </button>
+                </div>
+                
+                <!-- Upload-Einstellungen -->
+                <div class="mt-3">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="make-public">
+                        <label class="form-check-label" for="make-public">
+                            Öffentlich verfügbar machen
+                        </label>
+                    </div>
+                </div>
+                
+                <!-- Upload-Status -->
+                <div id="upload-status" class="mt-3"></div>
+            </div>
+        </div>
+        
+        <!-- Upload-Verlauf -->
+        <div class="card mt-3">
+            <div class="card-header">
+                <h6><i class="fas fa-history me-2"></i>Upload-Verlauf</h6>
+            </div>
+            <div class="card-body">
+                <div id="upload-history">
+                    <div class="text-muted text-center">
+                        Noch keine Uploads
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-6">
+        <!-- Öffentliche Dateien -->
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5><i class="fas fa-folder-open me-2"></i>Öffentliche Dateien</h5>
+                <button class="btn btn-outline-primary btn-sm" onclick="refreshPublicFiles()">
+                    <i class="fas fa-sync-alt"></i>
+                </button>
+            </div>
+            <div class="card-body">
+                <div id="public-files">
+                    {% for file in public_files %}
+                    <div class="card mb-2">
+                        <div class="card-body p-3">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div>
+                                    <h6 class="card-title mb-1">
+                                        {{ get_file_icon(file.original_filename) }} {{ file.original_filename }}
+                                    </h6>
+                                    <small class="text-muted">
+                                        {{ format_file_size(file.file_size) }} • 
+                                        {{ file.download_count }} Downloads •
+                                        {{ format_date(file.upload_timestamp) }}
+                                    </small>
+                                </div>
+                                <a href="{{ file.download_url }}" class="btn btn-sm btn-outline-primary">
+                                    <i class="fas fa-download"></i>
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                    {% else %}
+                    <div class="text-muted text-center">
+                        <i class="fas fa-folder-open fa-2x mb-2 d-block"></i>
+                        Keine öffentlichen Dateien verfügbar
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        
+        <!-- Datei-Statistiken -->
+        <div class="card mt-3">
+            <div class="card-header">
+                <h6><i class="fas fa-chart-pie me-2"></i>Statistiken</h6>
+            </div>
+            <div class="card-body">
+                <div class="row text-center">
+                    <div class="col-4">
+                        <div class="h4 text-primary" id="total-files">{{ public_files|length }}</div>
+                        <small>Dateien</small>
+                    </div>
+                    <div class="col-4">
+                        <div class="h4 text-success" id="total-downloads">
+                            {{ public_files|sum(attribute='download_count') }}
+                        </div>
+                        <small>Downloads</small>
+                    </div>
+                    <div class="col-4">
+                        <div class="h4 text-info" id="total-size">
+                            {{ format_total_size(public_files|sum(attribute='file_size')) }}
+                        </div>
+                        <small>Gesamt</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let uploadHistory = [];
+
+// Drag & Drop Handlers
+function allowDrop(event) {
+    event.preventDefault();
+}
+
+function dragEnter(event) {
+    event.preventDefault();
+    document.getElementById('upload-zone').classList.add('dragover');
+}
+
+function dragLeave(event) {
+    event.preventDefault();
+    if (!event.currentTarget.contains(event.relatedTarget)) {
+        document.getElementById('upload-zone').classList.remove('dragover');
+    }
+}
+
+function dropHandler(event) {
+    event.preventDefault();
+    document.getElementById('upload-zone').classList.remove('dragover');
+    
+    const files = event.dataTransfer.files;
+    handleFiles(files);
+}
+
+// Dateien verarbeiten
+function handleFiles(files) {
+    if (files.length === 0) return;
+    
+    const statusDiv = document.getElementById('upload-status');
+    statusDiv.innerHTML = '';
+    
+    Array.from(files).forEach((file, index) => {
+        uploadFile(file, index);
+    });
+}
+
+// Einzelne Datei hochladen
+async function uploadFile(file, index) {
+    const statusDiv = document.getElementById('upload-status');
+    const isPublic = document.getElementById('make-public').checked;
+    
+    // Upload-Status hinzufügen
+    const progressDiv = document.createElement('div');
+    progressDiv.id = `upload-${index}`;
+    progressDiv.className = 'mb-2';
+    progressDiv.innerHTML = `
+        <div class="d-flex justify-content-between align-items-center mb-1">
+            <small>${file.name}</small>
+            <small class="text-muted">${formatFileSize(file.size)}</small>
+        </div>
+        <div class="progress" style="height: 8px;">
+            <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                 style="width: 0%"></div>
+        </div>
+    `;
+    statusDiv.appendChild(progressDiv);
+    
+    try {
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('public', isPublic);
+        
+        // Simuliere Progress (vereinfacht)
+        const progressBar = progressDiv.querySelector('.progress-bar');
+        progressBar.style.width = '30%';
+        
+        const response = await fetch('/api/upload', {
+            method: 'POST',
+            body: formData
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            progressBar.style.width = '100%';
+            progressBar.classList.remove('progress-bar-animated', 'progress-bar-striped');
+            progressBar.classList.add('bg-success');
+            
+            // Zu Upload-History hinzufügen
+            uploadHistory.unshift({
+                ...result,
+                timestamp: new Date().toISOString(),
+                isPublic: isPublic
+            });
+            
+            updateUploadHistory();
+            
+            // Öffentliche Dateien neu laden falls public
+            if (isPublic) {
+                setTimeout(refreshPublicFiles, 1000);
+            }
+            
+        } else {
+            throw new Error(result.error);
+        }
+        
+    } catch (error) {
+        console.error('Upload-Fehler:', error);
+        
+        const progressBar = progressDiv.querySelector('.progress-bar');
+        progressBar.style.width = '100%';
+        progressBar.classList.remove('progress-bar-animated', 'progress-bar-striped');
+        progressBar.classList.add('bg-danger');
+        
+        // Fehler-Info hinzufügen
+        const errorDiv = document.createElement('div');
+        errorDiv.className = 'alert alert-danger alert-sm mt-1';
+        errorDiv.innerHTML = `<small><i class="fas fa-exclamation-triangle me-1"></i>${error.message}</small>`;
+        progressDiv.appendChild(errorDiv);
+    }
+}
+
+// Upload-History aktualisieren
+function updateUploadHistory() {
+    const container = document.getElementById('upload-history');
+    
+    if (uploadHistory.length === 0) {
+        container.innerHTML = '<div class="text-muted text-center">Noch keine Uploads</div>';
+        return;
+    }
+    
+    container.innerHTML = uploadHistory.slice(0, 5).map(item => `
+        <div class="d-flex justify-content-between align-items-center py-2 border-bottom">
+            <div>
+                <small class="fw-bold">${item.original_filename}</small>
+                <div class="text-muted" style="font-size: 0.75rem;">
+                    ${formatFileSize(item.file_size)} • 
+                    ${item.isPublic ? 'Öffentlich' : 'Privat'} •
+                    ${new Date(item.timestamp).toLocaleTimeString('de-DE')}
+                </div>
+            </div>
+            <a href="${item.download_url}" class="btn btn-sm btn-outline-primary">
+                <i class="fas fa-download"></i>
+            </a>
+        </div>
+    `).join('');
+}
+
+// Öffentliche Dateien neu laden
+async function refreshPublicFiles() {
+    try {
+        const response = await fetch('/api/files');
+        const result = await response.json();
+        
+        const container = document.getElementById('public-files');
+        
+        if (result.files.length === 0) {
+            container.innerHTML = `
+                <div class="text-muted text-center">
+                    <i class="fas fa-folder-open fa-2x mb-2 d-block"></i>
+                    Keine öffentlichen Dateien verfügbar
+                </div>
+            `;
+            return;
+        }
+        
+        container.innerHTML = result.files.map(file => `
+            <div class="card mb-2">
+                <div class="card-body p-3">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div>
+                            <h6 class="card-title mb-1">
+                                ${getFileIcon(file.original_filename)} ${file.original_filename}
+                            </h6>
+                            <small class="text-muted">
+                                ${formatFileSize(file.file_size)} • 
+                                ${file.download_count} Downloads •
+                                ${new Date(file.upload_timestamp).toLocaleDateString('de-DE')}
+                            </small>
+                        </div>
+                        <a href="${file.download_url}" class="btn btn-sm btn-outline-primary">
+                            <i class="fas fa-download"></i>
+                        </a>
+                    </div>
+                </div>
+            </div>
+        `).join('');
+        
+        // Statistiken aktualisieren
+        document.getElementById('total-files').textContent = result.files.length;
+        document.getElementById('total-downloads').textContent = 
+            result.files.reduce((sum, file) => sum + file.download_count, 0);
+        document.getElementById('total-size').textContent = 
+            formatFileSize(result.files.reduce((sum, file) => sum + file.file_size, 0));
+        
+    } catch (error) {
+        console.error('Fehler beim Laden öffentlicher Dateien:', error);
+        alert('Fehler beim Laden der öffentlichen Dateien');
+    }
+}
+
+// Hilfs-Funktionen
+function formatFileSize(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+function getFileIcon(filename) {
+    const ext = filename.split('.').pop().toLowerCase();
+    const icons = {
+        'jpg': '🖼️', 'jpeg': '🖼️', 'png': '🖼️', 'gif': '🖼️',
+        'pdf': '📄', 'doc': '📝', 'docx': '📝',
+        'py': '🐍', 'js': '📜', 'vue': '🌟', 'html': '🌐',
+        'zip': '📦', 'rar': '📦', '7z': '📦',
+        'mp4': '🎬', 'avi': '🎬', 'mov': '🎬',
+        'mp3': '🎵', 'wav': '🎵', 'flac': '🎵'
+    };
+    return icons[ext] || '📄';
+}
+
+// Click-to-Upload
+document.getElementById('upload-zone').addEventListener('click', function() {
+    document.getElementById('file-input').click();
+});
+</script>
+{% endblock %}'''
+    
+    (templates_dir / "file_manager.html").write_text(file_manager_template)
+
+def create_static_assets():
+    """Erstellt statische Assets"""
+    static_dir = config.base_dir / "static"
+    static_dir.mkdir(exist_ok=True)
+    
+    # CSS
+    css_dir = static_dir / "css"
+    css_dir.mkdir(exist_ok=True)
+    
+    custom_css = '''/* Custom Styles für KI-System */
+.gradient-text {
+    background: linear-gradient(45deg, #007bff, #28a745);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.chat-typing {
+    display: flex;
+    align-items: center;
+    padding: 10px;
+}
+
+.chat-typing span {
+    height: 8px;
+    width: 8px;
+    float: left;
+    margin: 0 1px;
+    background-color: #9E9EA1;
+    display: block;
+    border-radius: 50%;
+    opacity: 0.4;
+    animation: loading 1.4s infinite both;
+}
+
+.chat-typing span:nth-child(2) { animation-delay: 0.2s; }
+.chat-typing span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes loading {
+    0%, 80%, 100% {
+        opacity: .4;
+        transform: scale(1);
+    }
+    40% {
+        opacity: 1;
+        transform: scale(1.2);
+    }
+}
+
+.code-highlight {
+    background: #f8f9fa;
+    border-left: 4px solid #007bff;
+    padding: 10px;
+    border-radius: 4px;
+    font-family: 'Courier New', monospace;
+}
+
+.status-indicator {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 5px;
+}
+
+.status-online { background-color: #28a745; }
+.status-offline { background-color: #dc3545; }
+.status-busy { background-color: #ffc107; }
+
+.file-preview {
+    max-width: 200px;
+    max-height: 200px;
+    object-fit: cover;
+    border-radius: 8px;
+}
+
+.upload-progress {
+    transition: all 0.3s ease;
+}
+
+.connection-status {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    z-index: 1000;
+}
+'''
+    
+    (css_dir / "custom.css").write_text(custom_css)
+    
+    # JavaScript
+    js_dir = static_dir / "js"
+    js_dir.mkdir(exist_ok=True)
+    
+    utils_js = '''// Utility Functions für KI-System
+
+// Globale Utilities
+window.AISystem = {
+    // API Helper
+    api: {
+        async get(url) {
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return await response.json();
+        },
+        
+        async post(url, data) {
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data)
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return await response.json();
+        }
+    },
+    
+    // Formatierung
+    format: {
+        fileSize(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        },
+        
+        date(dateString) {
+            return new Date(dateString).toLocaleDateString('de-DE', {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+        },
+        
+        duration(seconds) {
+            const mins = Math.floor(seconds / 60);
+            const secs = seconds % 60;
+            return `${mins}:${secs.toString().padStart(2, '0')}`;
+        }
+    },
+    
+    // Notifications
+    notify: {
+        success(message) {
+            this._show(message, 'success');
+        },
+        
+        error(message) {
+            this._show(message, 'danger');
+        },
+        
+        info(message) {
+            this._show(message, 'info');
+        },
+        
+        _show(message, type) {
+            const toast = document.createElement('div');
+            toast.className = `alert alert-${type} alert-dismissible fade show position-fixed`;
+            toast.style.cssText = 'top: 20px; right: 20px; z-index: 2000; min-width: 300px;';
+            toast.innerHTML = `
+                ${message}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            `;
+            
+            document.body.appendChild(toast);
+            
+            // Auto-remove nach 5 Sekunden
+            setTimeout(() => {
+                if (toast.parentNode) {
+                    toast.remove();
+                }
+            }, 5000);
+        }
+    },
+    
+    // Loading States
+    loading: {
+        show(element, text = 'Laden...') {
+            const original = element.innerHTML;
+            element.dataset.originalContent = original;
+            element.innerHTML = `<i class="fas fa-spinner fa-spin me-2"></i>${text}`;
+            element.disabled = true;
+        },
+        
+        hide(element) {
+            if (element.dataset.originalContent) {
+                element.innerHTML = element.dataset.originalContent;
+                delete element.dataset.originalContent;
+            }
+            element.disabled = false;
+        }
+    }
+};
+
+// Global Error Handler
+window.addEventListener('error', function(event) {
+    console.error('Global Error:', event.error);
+    AISystem.notify.error('Ein unerwarteter Fehler ist aufgetreten.');
+});
+
+// Service Worker für Offline-Unterstützung (optional)
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function() {
+        navigator.serviceWorker.register('/static/js/sw.js')
+            .then(registration => console.log('SW registered'))
+            .catch(error => console.log('SW registration failed'));
+    });
+}
+'''
+    
+    (js_dir / "utils.js").write_text(utils_js)
+
+def setup_jinja_filters(app):
+    """Richtet Jinja2-Filter ein"""
+    
+    @app.template_filter('tojsonfilter')
+    def tojsonfilter(value):
+        return json.dumps(value)
+    
+    @app.template_filter('get_file_icon')
+    def get_file_icon(filename):
+        ext = filename.split('.')[-1].lower() if '.' in filename else ''
+        icons = {
+            'jpg': '🖼️', 'jpeg': '🖼️', 'png': '🖼️', 'gif': '🖼️',
+            'pdf': '📄', 'doc': '📝', 'docx': '📝',
+            'py': '🐍', 'js': '📜', 'vue': '🌟', 'html': '🌐',
+            'zip': '📦', 'mp4': '🎬', 'mp3': '🎵'
+        }
+        return icons.get(ext, '📄')
+    
+    @app.template_filter('format_file_size')  
+    def format_file_size(size):
+        if size == 0:
+            return '0 B'
+        k = 1024
+        sizes = ['B', 'KB', 'MB', 'GB']
+        i = int(np.floor(np.log(size) / np.log(k)))
+        return f"{round(size / (k ** i), 1)} {sizes[i]}"
+    
+    @app.template_filter('format_date')
+    def format_date(date_string):
+        try:
+            date = datetime.fromisoformat(date_string.replace('Z', '+00:00'))
+            return date.strftime('%d.%m.%Y %H:%M')
+        except:
+            return date_string
+
+def run_server():
+    """Startet den Web-Server"""
+    print("🚀 Starte KI-Web-System v5.0...")
+    print(f"📊 Server läuft auf: http://{config.host}:{config.port}")
+    print(f"💾 Datenbank: {config.database_path}")
+    print(f"📁 Upload-Ordner: {config.uploads_dir}")
+    print(f"💻 Code-Projekte: {config.code_projects_dir}")
+    
+    # Erstelle Templates und Assets) -> str:
+        """Erstellt neue Chat-Session"""
+        session_id = str(uuid.uuid4())
+        user_id = user_id or f"anon_{uuid.uuid4().hex[:8]}"
+        
+        session_data = {
+            'user_id': user_id,
+            'created_at': datetime.now().isoformat(),
+            'conversation_context': {},
+            'user_preferences': {}
+        }
+        
+        self.db_manager.execute_query(
+            "INSERT INTO chat_sessions (id, user_id, session_data) VALUES (?, ?, ?)",
+            (session_id, user_id, json.dumps(session_data))
+        )
+        
+        self.active_sessions[session_id] = session_data
+        return session_id
+    
+    def process_message(self, session_id: str, user_message: str) -> Dict:
+        """Verarbeitet Benutzer-Nachricht mit allen integrierten Features"""
+        
+        # Speichere User-Nachricht
+        self.db_manager.save_chat_message(session_id, 'user', user_message)
+        
+        try:
+            # Analysiere Nachricht-Intention
+            intent = self._analyze_message_intent(user_message)
+            
+            # Basis-Antwort
+            response = {
+                'type': 'ai_response',
+                'content': '',
+                'intent': intent,
+                'timestamp': datetime.now().isoformat(),
+                'sources': [],
+                'actions_performed': []
+            }
+            
+            # Führe verschiedene Aktionen basierend auf Intent aus
+            if intent['needs_search']:
+                search_results = self._perform_web_search(user_message, intent)
+                response['search_results'] = search_results
+                response['actions_performed'].append('web_search')
+                
+                # Crawle Top-Ergebnisse für tieferes Wissen
+                if search_results and len(search_results) > 0:
+                    crawl_results = self.crawler.batch_crawl_from_search_results(search_results[:3])
+                    response['crawl_results'] = crawl_results
+                    response['actions_performed'].append('web_crawling')
+                    
+                    # Extrahiere Wissen aus gecrawlten Inhalten
+                    if any(cr.get('status') == 'success' for cr in crawl_results):
+                        learning_result = self.knowledge_learner.learn_from_crawled_content(10)
+                        response['learning_result'] = learning_result
+                        response['actions_performed'].append('knowledge_learning')
+            
+            # Generiere empathische Antwort
+            empathic_content = self._generate_empathic_response(user_message, intent, response)
+            response['content'] = empathic_content
+            
+            # Speichere AI-Antwort
+            self.db_manager.save_chat_message(
+                session_id, 'ai', empathic_content, 
+                {'intent': intent, 'actions': response['actions_performed']}
+            )
+            
+            return response
+            
+        except Exception as e:
+            logging.error(f"Chat-Verarbeitung Fehler: {e}")
+            
+            error_response = {
+                'type': 'error',
+                'content': 'Es tut mir leid, aber es gab einen technischen Fehler bei der Verarbeitung Ihrer Nachricht. Ihre Gedanken sind trotzdem wichtig und ich bin hier, um zu helfen.',
+                'error': str(e),
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            self.db_manager.save_chat_message(session_id, 'system', str(e))
+            return error_response
+    
+    def _analyze_message_intent(self, message: str) -> Dict:
+        """Analysiert Nachricht-Intention"""
+        message_lower = message.lower()
+        
+        intent = {
+            'needs_search': False,
+            'emotional_tone': 'neutral',
+            'topic_category': 'general',
+            'urgency': 'normal',
+            'support_type': 'informational'
+        }
+        
+        # Such-Bedarf erkennen
+        search_indicators = [
+            'suche', 'finde', 'google', 'information', 'erkläre mir', 'was ist',
+            'wie funktioniert', 'zeige mir', 'ich möchte wissen'
+        ]
+        
+        if any(indicator in message_lower for indicator in search_indicators):
+            intent['needs_search'] = True
+        
+        # Emotionaler Ton
+        if any(word in message_lower for word in ['traurig', 'deprimiert', 'verzweifelt', 'hilfe']):
+            intent['emotional_tone'] = 'distressed'
+            intent['support_type'] = 'emotional'
+            
+        elif any(word in message_lower for word in ['freude', 'glücklich', 'toll', 'super']):
+            intent['emotional_tone'] = 'positive'
+            
+        elif any(word in message_lower for word in ['stress', 'überfordert', 'problem']):
+            intent['emotional_tone'] = 'stressed'
+            intent['support_type'] = 'practical'
+        
+        # Themen-Kategorien
+        if any(word in message_lower for word in ['code', 'programm', 'python', 'vue', 'entwickl']):
+            intent['topic_category'] = 'programming'
+            intent['needs_search'] = True
+            
+        elif any(word in message_lower for word in ['upload', 'datei', 'download']):
+            intent['topic_category'] = 'file_management'
+            
+        elif any(word in message_lower for word in ['leben', 'sinn', 'zukunft', 'entscheidung']):
+            intent['topic_category'] = 'life_guidance'
+            intent['support_type'] = 'counseling'
+        
+        # Dringlichkeit
+        if any(word in message_lower for word in ['dringend', 'sofort', 'notfall', 'hilfe']):
+            intent['urgency'] = 'high'
+        
+        return intent
+    
+    def _perform_web_search(self, query: str, intent: Dict) -> List[Dict]:
+        """Führt Web-Suche durch"""
+        try:
+            # Erweitere Query basierend auf Intent
+            enhanced_query = query
+            
+            if intent['topic_category'] == 'programming':
+                enhanced_query += ' tutorial beispiel code'
+            elif intent['emotional_tone'] == 'distressed':
+                enhanced_query += ' hilfe unterstützung'
+            
+            results = self.search_engine.search(enhanced_query, max_results=8)
+            return results
+            
+        except Exception as e:
+            logging.error(f"Web-Suche Fehler: {e}")
+            return []
+    
+    def _generate_empathic_response(self, user_message: str, intent: Dict, context: Dict) -> str:
+        """Generiert empathische Antwort"""
+        
+        # Empathische Einleitung basierend auf emotionalem Ton
+        if intent['emotional_tone'] == 'distressed':
+            empathic_intro = "Ich erkenne, dass Sie sich in einer schwierigen Situation befinden, und möchte Ihnen gerne helfen. Ihre Gefühle sind wichtig und berechtigt."
+            
+        elif intent['emotional_tone'] == 'positive':
+            empathic_intro = "Es freut mich zu sehen, dass Sie mit einer positiven Einstellung an dieses Thema herangehen!"
+            
+        elif intent['emotional_tone'] == 'stressed':
+            empathic_intro = "Ich verstehe, dass Sie sich gestresst fühlen. Lassen Sie uns gemeinsam nach Lösungen suchen."
+            
+        else:
+            empathic_intro = "Vielen Dank für Ihre Frage. Ich helfe Ihnen gerne weiter."
+        
+        # Hauptinhalt basierend auf verfügbaren Informationen
+        main_content = ""
+        
+        if context.get('search_results'):
+            search_results = context['search_results']
+            
+            if search_results and len(search_results) > 0:
+                main_content += f"\n\nIch habe {len(search_results)} relevante Informationsquellen für Sie gefunden:\n\n"
+                
+                for i, result in enumerate(search_results[:3], 1):
+                    title = result.get('title', 'Kein Titel')
+                    description = result.get('description', 'Keine Beschreibung')[:150]
+                    url = result.get('url', '')
+                    
+                    main_content += f"{i}. **{title}**\n"
+                    if description:
+                        main_content += f"   {description}{'...' if len(description) == 150 else ''}\n"
+                    if url:
+                        main_content += f"   🔗 [Quelle ansehen]({url})\n"
+                    main_content += "\n"
+        
+        # Zusätzliche Aktionen erwähnen
+        actions_performed = context.get('actions_performed', [])
+        if 'web_crawling' in actions_performed:
+            main_content += "Ich habe auch weiterführende Informationen aus verschiedenen Quellen gesammelt und in meine Wissensdatenbank integriert.\n\n"
+        
+        if 'knowledge_learning' in actions_performed:
+            learning_result = context.get('learning_result', {})
+            if learning_result.get('extracted_knowledge', 0) > 0:
+                main_content += f"Dabei habe ich {learning_result['extracted_knowledge']} neue Wissenselemente für zukünftige Anfragen gelernt.\n\n"
+        
+        # Unterstützende Guidance basierend auf Support-Type
+        support_guidance = ""
+        
+        if intent['support_type'] == 'emotional':
+            support_guidance = """
+💝 **Emotionale Unterstützung:**
+Denken Sie daran, dass schwierige Zeiten vorübergehen. Sie haben bereits Stärke gezeigt, indem Sie nach Hilfe gesucht haben. Es ist völlig normal, Unterstützung zu benötigen.
+
+Falls Sie professionelle Hilfe benötigen, zögern Sie nicht, sich an entsprechende Beratungsstellen zu wenden.
+"""
+            
+        elif intent['support_type'] == 'practical':
+            support_guidance = """
+🛠️ **Praktische Schritte:**
+• Teilen Sie große Probleme in kleinere, lösbare Schritte auf
+• Setzen Sie Prioritäten und konzentrieren Sie sich auf das Wichtigste
+• Suchen Sie sich Unterstützung in Ihrem sozialen Umfeld
+• Planen Sie bewusst Pausen und Erholung ein
+"""
+            
+        elif intent['support_type'] == 'counseling':
+            support_guidance = """
+🌟 **Lebensberatung:**
+Große Lebensfragen erfordern Zeit und Reflexion. Es ist weise, verschiedene Perspektiven zu betrachten und sich nicht unter Druck zu setzen.
+
+Vertrauen Sie auf Ihre innere Weisheit, während Sie gleichzeitig offen für neue Erkenntnisse bleiben.
+"""
+        
+        # Zusammenstellung der Antwort
+        full_response = empathic_intro
+        
+        if main_content:
+            full_response += main_content
+        
+        if support_guidance:
+            full_response += support_guidance
+        
+        # Ermutigende Schlussworte
+        if intent['emotional_tone'] in ['distressed', 'stressed']:
+            full_response += "\n🤗 Sie sind nicht allein mit Ihren Herausforderungen. Ich bin hier, um Sie zu unterstützen, und Sie können jederzeit weitere Fragen stellen."
+        else:
+            full_response += "\n💭 Falls Sie weitere Fragen haben oder tiefer in ein Thema einsteigen möchten, bin ich gerne da."
+        
+        return full_response
+    
+    def get_chat_history(self, session_id: str, limit: int = 50) -> List[Dict]:
+        """Holt Chat-Verlauf"""
+        results = self.db_manager.execute_query(
+            """SELECT message_type, content, metadata, timestamp 
+               FROM chat_messages 
+               WHERE session_id = ? 
+               ORDER BY timestamp DESC 
+               LIMIT ?""",
+            (session_id, limit)
+        )
+        
+        return [
+            {
+                'message_type': row[0],
+                'content': row[1],
+                'metadata': json.loads(row[2]) if row[2] else {},
+                'timestamp': row[3]
+            }
+            for row in reversed(results)  # Neueste zuerst -> Älteste zuerst
+        ]
+
+# Flask Web Application
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'your-secret-key-here'
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file upload
+
+# Enable CORS für Frontend-Integration
+CORS(app)
+
+# SocketIO für Real-time Chat
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+# System-Initialisierung
+config = SystemConfig()
+db_manager = DatabaseManager(config.database_path)
+yahoo_search = YahooSearchEngine()
+web_crawler = WebCrawler(db_manager)
+knowledge_learner = KnowledgeLearner(db_manager)
+code_assistant = CodeAssistant(db_manager, config.code_projects_dir)
+file_manager = FileUploadDownloadManager(config, db_manager)
+chatbot = EmpathicChatBot(db_manager, yahoo_search, web_crawler, knowledge_learner)
+
+# Web-Routes
+@app.route('/')
+def index():
+    """Hauptseite"""
+    return render_template('index.html', pegasus_config=config.pegasus_config)
+
+@app.route('/chat')
+def chat_page():
+    """Chat-Seite"""
+    return render_template('chat.html', pegasus_config=config.pegasus_config)
+
+@app.route('/code-assistant')
+def code_assistant_page():
+    """Code-Assistent Seite"""
+    return render_template('code_assistant.html')
+
+@app.route('/file-manager')
+def file_manager_page():
+    """Datei-Manager Seite"""
+    public_files = file_manager.list_public_files()
+    return render_template('file_manager.html', public_files=public_files)
+
+# API-Endpoints
+@app.route('/api/chat/session', methods=['POST'])
+def create_chat_session():
+    """Erstellt neue Chat-Session"""
+    user_id = request.json.get('user_id') if request.json else None
+    session_id = chatbot.create_chat_session(user_id)
+    
+    return jsonify({
+        'session_id': session_id,
+        'status': 'created'
+    })
+
+@app.route('/api/chat/message', methods=['POST'])
+def send_chat_message():
+    """Sendet Chat-Nachricht"""
+    data = request.json
+    session_id = data.get('session_id')
+    message = data.get('message')
+    
+    if not session_id or not message:
+        return jsonify({'error': 'Session ID und Nachricht erforderlich'}), 400
+    
+    response = chatbot.process_message(session_id, message)
+    return jsonify(response)
+
+@app.route('/api/chat/history/<session_id>')
+def get_chat_history(session_id):
+    """Holt Chat-Verlauf"""
+    limit = request.args.get('limit', 50, type=int)
+    history = chatbot.get_chat_history(session_id, limit)
+    
+    return jsonify({
+        'session_id': session_id,
+        'history': history
+    })
+
+@app.route('/api/search', methods=['POST'])
+def web_search():
+    """Web-Suche API"""
+    data = request.json
+    query = data.get('query')
+    max_results = data.get('max_results', 10)
+    
+    if not query:
+        return jsonify({'error': 'Query erforderlich'}), 400
+    
+    results = yahoo_search.search(query, max_results)
+    return jsonify({
+        'query': query,
+        'results': results,
+        'count': len(results)
+    })
+
+@app.route('/api/crawl', methods=['POST'])
+def crawl_urls():
+    """URL-Crawling API"""
+    data = request.json
+    urls = data.get('urls', [])
+    
+    if not urls:
+        return jsonify({'error': 'URLs erforderlich'}), 400
+    
+    results = []
+    for url in urls:
+        result = web_crawler.crawl_url(url)
+        results.append(result)
+    
+    return jsonify({
+        'crawl_results': results,
+        'processed_count': len(results)
+    })
+
+@app.route('/api/learn', methods=['POST'])
+def trigger_learning():
+    """Triggert Wissens-Lernen"""
+    data = request.json
+    max_items = data.get('max_items', 50)
+    
+    result = knowledge_learner.learn_from_crawled_content(max_items)
+    
+    return jsonify({
+        'learning_result': result,
+        'status': 'completed'
+    })
+
+@app.route('/api/projects', methods=['GET'])
+def list_projects():
+    """Listet Code-Projekte"""
+    projects = db_manager.execute_query(
+        """SELECT id, project_name, project_type, created_at, last_modified 
+           FROM code_projects 
+           ORDER BY last_modified DESC"""
+    )
+    
+    project_list = [
+        {
+            'id': row[0],
+            'name': row[1],
+            'type': row[2],
+            'created_at': row[3],
+            'last_modified': row[4]
+        }
+        for row in projects
+    ]
+    
+    return jsonify({'projects': project_list})
+
+@app.route('/api/projects', methods=['POST'])
+def create_project():
+    """Erstellt neues Code-Projekt"""
+    data = request.json
+    project_name = data.get('name')
+    project_type = data.get('type')
+    
+    if not project_name or project_type not in ['python', 'vue', 'mixed']:
+        return jsonify({'error': 'Projektname und gültiger Typ erforderlich'}), 400
+    
+    result = code_assistant.create_project(project_name, project_type)
+    return jsonify(result)
+
+@app.route('/api/projects/<project_id>/files')
+def get_project_files(project_id):
+    """Holt Projekt-Dateien"""
+    files = code_assistant.get_project_files(project_id)
+    return jsonify(files)
+
+@app.route('/api/projects/<project_id>/files/<path:file_path>', methods=['PUT'])
+def save_project_file(project_id, file_path):
+    """Speichert Projekt-Datei"""
+    content = request.json.get('content')
+    
+    if content is None:
+        return jsonify({'error': 'Content erforderlich'}), 400
+    
+    result = code_assistant.save_file_content(project_id, file_path, content)
+    return jsonify(result)
+
+@app.route('/api/upload', methods=['POST'])
+def upload_file():
+    """Datei-Upload"""
+    if 'file' not in request.files:
+        return jsonify({'error': 'Keine Datei'}), 400
+    
+    file = request.files['file']
+    is_public = request.form.get('public', 'false').lower() == 'true'
+    
+    result = file_manager.upload_file(file, is_public)
+    return jsonify(result)
+
+@app.route('/download/<file_id>')
+def download_file(file_id):
+    """Datei-Download"""
+    file_info = file_manager.get_file_info(file_id)
+    
+    if not file_info:
+        return jsonify({'error': 'Datei nicht gefunden'}), 404
+    
+    file_path = config.uploads_dir / file_info['stored_filename']
+    
+    if not file_path.exists():
+        return jsonify({'error': 'Physische Datei nicht gefunden'}), 404
+    
+    # Download-Zähler erhöhen
+    file_manager.increment_download_count(file_id)
+    
+    return send_file(
+        str(file_path),
+        as_attachment=True,
+        download_name=file_info['original_filename'],
+        mimetype=file_info['mime_type']
+    )
+
+@app.route('/api/files')
+def list_public_files():
+    """Listet öffentliche Dateien"""
+    limit = request.args.get('limit', 50, type=int)
+    files = file_manager.list_public_files(limit)
+    
+    return jsonify({
+        'files': files,
+        'count': len(files)
+    })
+
+# SocketIO Events für Real-time Chat
+@socketio.on('connect')
+def handle_connect():
+    """WebSocket Verbindung"""
+    emit('status', {'msg': 'Verbunden mit KI-System'})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """WebSocket Trennung"""
+    print('Client getrennt')
+
+@socketio.on('chat_message')
+def handle_chat_message(data):
+    """Real-time Chat-Nachricht"""
+    session_id = data.get('session_id')
+    message = data.get('message')
+    
+    if session_id and message:
+        # Verarbeite Nachricht
+        response = chatbot.process_message(session_id, message)
+        
+        # Sende Antwort zurück
+        emit('chat_response', response)
+    else:
+        emit('error', {'msg': 'Session ID und Nachricht erforderlich'})
+
+def create_html_templates():
+    """Erstellt HTML-Templates"""
+    templates_dir = config.base_dir / "templates"
+    templates_dir.mkdir(exist_ok=True)
+    
+    # Basis-Layout
+    base_template = '''<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}KI-System v5.0{% endblock %}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .chat-container {
+            height: 600px;
+            overflow-y: auto;
+            border: 1px solid #dee2e6;
+            padding: 15px;
+            background: #f8f9fa;
+        }
+        .message {
+            margin-bottom: 15px;
+            padding: 10px;
+            border):
+        """Speichert Chat-Nachricht"""
+        self.execute_query(
+            "INSERT INTO chat_messages (session_id, message_type, content, metadata) VALUES (?, ?, ?, ?)",
+            (session_id, message_type, content, json.dumps(metadata) if metadata else None)
+        )
+
+class YahooSearchEngine:
+    """Yahoo Search Integration"""
+    
+    def __init__(self):
+        self.base_url = "https://search.yahoo.com/search"
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+    
+    def search(self, query: str, max_results: int = 10) -> List[Dict]:
+        """Führt Yahoo-Suche durch"""
+        try:
+            params = {
+                'p': query,
+                'n': max_results
+            }
+            
+            response = self.session.get(self.base_url, params=params, timeout=10)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            results = []
+            
+            # Yahoo-spezifische Selektoren
+            search_results = soup.find_all('div', {'class': 'dd algo'}) or \
+                           soup.find_all('li', {'class': 'dd'}) or \
+                           soup.find_all('div', {'class': 'result'})
+            
+            for result in search_results[:max_results]:
+                try:
+                    # Titel extrahieren
+                    title_elem = result.find('h3') or result.find('a')
+                    title = title_elem.get_text().strip() if title_elem else "Kein Titel"
+                    
+                    # URL extrahieren
+                    link_elem = result.find('a', href=True)
+                    url = link_elem['href'] if link_elem else ""
+                    
+                    # Beschreibung extrahieren
+                    desc_elem = result.find('p') or result.find('div', {'class': 'compText'})
+                    description = desc_elem.get_text().strip() if desc_elem else ""
+                    
+                    if title and url:
+                        results.append({
+                            'title': title,
+                            'url': url,
+                            'description': description,
+                            'source': 'yahoo'
+                        })
+                        
+                except Exception as e:
+                    logging.warning(f"Fehler beim Parsen eines Suchergebnisses: {e}")
+                    continue
+            
+            return results
+            
+        except Exception as e:
+            logging.error(f"Yahoo-Suche Fehler: {e}")
+            return [{
+                'title': 'Suchfehler',
+                'url': '',
+                'description': f'Yahoo-Suche für "{query}" fehlgeschlagen: {str(e)}',
+                'source': 'error'
+            }]
+
+class WebCrawler:
+    """Intelligenter Web-Crawler für Knowledge-Aufbau"""
+    
+    def __init__(self, db_manager: DatabaseManager):
+        self.db_manager = db_manager
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Educational Knowledge Crawler 1.0'
+        })
+        self.crawled_urls = set()
+        
+    def crawl_url(self, url: str) -> Dict:
+        """Crawlt eine einzelne URL"""
+        try:
+            if url in self.crawled_urls:
+                return {'status': 'skipped', 'reason': 'already_crawled'}
+            
+            response = self.session.get(url, timeout=15)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Titel extrahieren
+            title = soup.find('title')
+            title = title.get_text().strip() if title else "Kein Titel"
+            
+            # Hauptinhalt extrahieren
+            content_selectors = [
+                'article', 'main', '.content', '.post', '.entry-content',
+                'div[role="main"]', '.container'
+            ]
+            
+            content = ""
+            for selector in content_selectors:
+                content_elem = soup.select_one(selector)
+                if content_elem:
+                    # Entferne Scripts, Styles etc.
+                    for unwanted in content_elem.find_all(['script', 'style', 'nav', 'footer']):
+                        unwanted.decompose()
+                    
+                    content = content_elem.get_text(separator=' ', strip=True)
+                    break
+            
+            if not content:
+                # Fallback: Alle p-Tags
+                paragraphs = soup.find_all('p')
+                content = ' '.join([p.get_text().strip() for p in paragraphs])
+            
+            # Content-Hash für Duplikatserkennung
+            content_hash = hashlib.md5(content.encode()).hexdigest()
+            
+            # Qualitätsbewertung
+            quality_score = self._assess_content_quality(content, title)
+            
+            # In Datenbank speichern
+            try:
+                self.db_manager.execute_query(
+                    """INSERT OR REPLACE INTO crawled_content 
+                       (url, title, content, content_hash, source_type, quality_score) 
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (url, title, content[:10000], content_hash, 'web_crawl', quality_score)
+                )
+            except Exception as db_e:
+                logging.warning(f"Datenbank-Fehler beim Speichern von {url}: {db_e}")
+            
+            self.crawled_urls.add(url)
+            
+            return {
+                'status': 'success',
+                'title': title,
+                'content_length': len(content),
+                'quality_score': quality_score,
+                'url': url
+            }
+            
+        except requests.exceptions.RequestException as e:
+            logging.warning(f"Crawling-Fehler für {url}: {e}")
+            return {'status': 'error', 'error': str(e), 'url': url}
+        
+        except Exception as e:
+            logging.error(f"Unerwarteter Crawling-Fehler für {url}: {e}")
+            return {'status': 'error', 'error': str(e), 'url': url}
+    
+    def _assess_content_quality(self, content: str, title: str) -> float:
+        """Bewertet Content-Qualität"""
+        score = 0.0
+        
+        # Längen-Check
+        if 100 <= len(content) <= 10000:
+            score += 0.3
+        elif len(content) > 10000:
+            score += 0.2
+        
+        # Titel-Check
+        if title and len(title) > 5:
+            score += 0.2
+        
+        # Struktur-Check
+        sentences = content.count('.') + content.count('!') + content.count('?')
+        if sentences > 5:
+            score += 0.2
+        
+        # Informationsgehalt-Check (vereinfacht)
+        info_keywords = ['weil', 'deshalb', 'daher', 'beispiel', 'methode', 'lösung']
+        info_count = sum(1 for keyword in info_keywords if keyword in content.lower())
+        score += min(info_count * 0.1, 0.3)
+        
+        return min(score, 1.0)
+    
+    def batch_crawl_from_search_results(self, search_results: List[Dict]) -> List[Dict]:
+        """Crawlt mehrere URLs aus Suchergebnissen"""
+        crawl_results = []
+        
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = []
+            
+            for result in search_results:
+                url = result.get('url', '')
+                if url and url.startswith('http'):
+                    future = executor.submit(self.crawl_url, url)
+                    futures.append(future)
+            
+            for future in futures:
+                try:
+                    crawl_result = future.result(timeout=30)
+                    crawl_results.append(crawl_result)
+                except Exception as e:
+                    crawl_results.append({
+                        'status': 'error', 
+                        'error': f'Timeout oder Fehler: {str(e)}'
+                    })
+        
+        return crawl_results
+
+class KnowledgeLearner:
+    """Intelligenter Knowledge-Lerner aus gecrawlten Inhalten"""
+    
+    def __init__(self, db_manager: DatabaseManager):
+        self.db_manager = db_manager
+        
+    def extract_knowledge_from_content(self, content: str, source_url: str = "") -> List[Dict]:
+        """Extrahiert strukturiertes Wissen aus Content"""
+        knowledge_items = []
+        
+        # Einfache Pattern-basierte Extraktion
+        patterns = {
+            'definition': r'(.+) ist (.+?)[\.\!\?]',
+            'explanation': r'(.+) bedeutet (.+?)[\.\!\?]',
+            'method': r'(?:Methode|Verfahren|Lösung):\s*(.+?)[\.\!\?]',
+            'example': r'(?:Beispiel|Zum Beispiel):\s*(.+?)[\.\!\?]',
+            'instruction': r'(?:Schritt \d+|Zunächst|Dann|Anschließend|Zuerst):\s*(.+?)[\.\!\?]'
+        }
+        
+        import re
+        
+        for pattern_type, pattern in patterns.items():
+            matches = re.findall(pattern, content, re.IGNORECASE | re.MULTILINE)
+            
+            for match in matches:
+                if isinstance(match, tuple):
+                    topic = match[0].strip()
+                    content_text = match[1].strip()
+                else:
+                    topic = pattern_type
+                    content_text = match.strip()
+                
+                if len(content_text) > 10 and len(content_text) < 500:
+                    knowledge_items.append({
+                        'topic': topic,
+                        'content': content_text,
+                        'source_url': source_url,
+                        'pattern_type': pattern_type,
+                        'confidence': self._calculate_confidence(content_text, pattern_type)
+                    })
+        
+        return knowledge_items
+    
+    def _calculate_confidence(self, content: str, pattern_type: str) -> float:
+        """Berechnet Confidence-Score für extrahiertes Wissen"""
+        confidence = 0.5  # Base confidence
+        
+        # Pattern-Type Bonuses
+        pattern_bonuses = {
+            'definition': 0.3,
+            'explanation': 0.2,
+            'method': 0.3,
+            'example': 0.1,
+            'instruction': 0.2
+        }
+        
+        confidence += pattern_bonuses.get(pattern_type, 0.0)
+        
+        # Content-Quality Bonuses
+        if 20 <= len(content) <= 200:
+            confidence += 0.1
+        
+        # Specific keyword bonuses
+        quality_keywords = ['weil', 'da', 'durch', 'mittels', 'beispielsweise']
+        keyword_bonus = sum(0.05 for keyword in quality_keywords if keyword in content.lower())
+        confidence += min(keyword_bonus, 0.2)
+        
+        return min(confidence, 1.0)
+    
+    def learn_from_crawled_content(self, max_items: int = 100) -> Dict:
+        """Lernt aus allen gecrawlten Inhalten"""
+        # Hole qualitativ hochwertige gecrawlte Inhalte
+        crawled_data = self.db_manager.execute_query(
+            """SELECT url, title, content FROM crawled_content 
+               WHERE quality_score > 0.5 
+               ORDER BY quality_score DESC, crawl_timestamp DESC 
+               LIMIT ?""",
+            (max_items,)
+        )
+        
+        total_knowledge_items = 0
+        processed_items = 0
+        
+        for url, title, content in crawled_data:
+            try:
+                knowledge_items = self.extract_knowledge_from_content(content, url)
+                
+                for item in knowledge_items:
+                    # Speichere in Knowledge Base
+                    self.db_manager.execute_query(
+                        """INSERT INTO knowledge_base 
+                           (topic, content, source_url, confidence_score, tags) 
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (
+                            item['topic'],
+                            item['content'], 
+                            item['source_url'],
+                            item['confidence'],
+                            item['pattern_type']
+                        )
+                    )
+                    total_knowledge_items += 1
+                
+                processed_items += 1
+                
+            except Exception as e:
+                logging.warning(f"Knowledge-Extraktion Fehler für {url}: {e}")
+                continue
+        
+        return {
+            'processed_items': processed_items,
+            'extracted_knowledge': total_knowledge_items,
+            'success': True
+        }
+
+class CodeAssistant:
+    """VSCode/Python/Vue.js Code-Assistent"""
+    
+    def __init__(self, db_manager: DatabaseManager, projects_dir: Path):
+        self.db_manager = db_manager
+        self.projects_dir = projects_dir
+        
+    def create_project(self, project_name: str, project_type: str) -> Dict:
+        """Erstellt neues Code-Projekt"""
+        project_id = str(uuid.uuid4())
+        project_path = self.projects_dir / project_id
+        project_path.mkdir(exist_ok=True)
+        
+        # Projekt-Struktur basierend auf Typ
+        if project_type == 'python':
+            self._create_python_project_structure(project_path, project_name)
+        elif project_type == 'vue':
+            self._create_vue_project_structure(project_path, project_name)
+        elif project_type == 'mixed':
+            self._create_mixed_project_structure(project_path, project_name)
+        
+        # In Datenbank speichern
+        project_data = {
+            'name': project_name,
+            'type': project_type,
+            'path': str(project_path),
+            'created_at': datetime.now().isoformat()
+        }
+        
+        self.db_manager.execute_query(
+            """INSERT INTO code_projects 
+               (id, project_name, project_type, project_data, file_structure) 
+               VALUES (?, ?, ?, ?, ?)""",
+            (project_id, project_name, project_type, 
+             json.dumps(project_data), self._get_file_structure(project_path))
+        )
+        
+        return {
+            'project_id': project_id,
+            'project_path': str(project_path),
+            'status': 'created',
+            'project_data': project_data
+        }
+    
+    def _create_python_project_structure(self, project_path: Path, project_name: str):
+        """Erstellt Python-Projekt-Struktur"""
+        # Hauptdateien
+        (project_path / "main.py").write_text(f'''#!/usr/bin/env python3
+"""
+{project_name}
+Generiert von KI-Coding-Assistent
+"""
+
+def main():
+    print("Hallo von {project_name}!")
+    # Ihr Code hier
+
+if __name__ == "__main__":
+    main()
+''')
+        
+        (project_path / "requirements.txt").write_text('''# Python-Dependencies
+flask>=2.0.0
+requests>=2.25.0
+''')
+        
+        (project_path / "README.md").write_text(f'''# {project_name}
+
+Beschreibung des Projekts hier.
+
+## Installation
+```bash
+pip install -r requirements.txt
+```
+
+## Verwendung
+```bash
+python main.py
+```
+''')
+        
+        # Verzeichnisse
+        (project_path / "src").mkdir(exist_ok=True)
+        (project_path / "tests").mkdir(exist_ok=True)
+        (project_path / "docs").mkdir(exist_ok=True)
+    
+    def _create_vue_project_structure(self, project_path: Path, project_name: str):
+        """Erstellt Vue.js-Projekt-Struktur"""
+        # package.json
+        package_json = {
+            "name": project_name.lower().replace(" ", "-"),
+            "version": "1.0.0",
+            "description": f"{project_name} - Vue.js Projekt",
+            "main": "index.js",
+            "scripts": {
+                "dev": "vue-cli-service serve",
+                "build": "vue-cli-service build",
+                "serve": "vue-cli-service serve"
+            },
+            "dependencies": {
+                "vue": "^3.0.0",
+                "vue-router": "^4.0.0"
+            },
+            "devDependencies": {
+                "@vue/cli-service": "^4.5.0"
+            }
+        }
+        
+        (project_path / "package.json").write_text(json.dumps(package_json, indent=2))
+        
+        # Vue-Hauptdatei
+        src_dir = project_path / "src"
+        src_dir.mkdir(exist_ok=True)
+        
+        (src_dir / "App.vue").write_text(f'''<template>
+  <div id="app">
+    <h1>Willkommen bei {project_name}</h1>
+    <p>Dies ist eine Vue.js-Anwendung, generiert vom KI-Assistenten.</p>
+  </div>
+</template>
+
+<script>
+export default {{
+  name: 'App',
+  mounted() {{
+    console.log('{project_name} gestartet!');
+  }}
+}}
+</script>
+
+<style>
+#app {{
+  font-family: Avenir, Helvetica, Arial, sans-serif;
+  text-align: center;
+  color: #2c3e50;
+  margin-top: 60px;
+}}
+</style>
+''')
+        
+        (src_dir / "main.js").write_text('''import { createApp } from 'vue'
+import App from './App.vue'
+
+createApp(App).mount('#app')
+''')
+        
+        # Public directory
+        public_dir = project_path / "public"
+        public_dir.mkdir(exist_ok=True)
+        
+        (public_dir / "index.html").write_text(f'''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <title>{project_name}</title>
+</head>
+<body>
+    <div id="app"></div>
+</body>
+</html>
+''')
+    
+    def _create_mixed_project_structure(self, project_path: Path, project_name: str):
+        """Erstellt Mixed Python/Vue-Projekt-Struktur"""
+        # Backend (Python/Flask)
+        backend_dir = project_path / "backend"
+        backend_dir.mkdir(exist_ok=True)
+        
+        (backend_dir / "app.py").write_text(f'''#!/usr/bin/env python3
+"""
+{project_name} - Backend API
+"""
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+
+app = Flask(__name__)
+CORS(app)
+
+@app.route('/api/hello')
+def hello():
+    return jsonify({{'message': 'Hallo von {project_name} Backend!'}})
+
+@app.route('/api/data', methods=['GET', 'POST'])
+def data():
+    if request.method == 'POST':
+        data = request.get_json()
+        return jsonify({{'received': data, 'status': 'success'}})
+    else:
+        return jsonify({{'data': 'Beispiel-Daten vom Backend'}})
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
+''')
+        
+        (backend_dir / "requirements.txt").write_text('''flask>=2.0.0
+flask-cors>=3.0.0
+requests>=2.25.0
+''')
+        
+        # Frontend (Vue)
+        frontend_dir = project_path / "frontend"
+        frontend_dir.mkdir(exist_ok=True)
+        
+        # Verwende Vue-Struktur für Frontend
+        self._create_vue_project_structure(frontend_dir, f"{project_name} Frontend")
+    
+    def _get_file_structure(self, project_path: Path) -> str:
+        """Erstellt Dateistruktur-Übersicht"""
+        structure = []
+        
+        def add_directory(path: Path, level: int = 0):
+            indent = "  " * level
+            for item in sorted(path.iterdir()):
+                if item.is_file():
+                    structure.append(f"{indent}📄 {item.name}")
+                elif item.is_dir() and not item.name.startswith('.'):
+                    structure.append(f"{indent}📁 {item.name}/")
+                    if level < 3:  # Begrenze Tiefe
+                        add_directory(item, level + 1)
+        
+        add_directory(project_path)
+        return "\n".join(structure)
+    
+    def get_project_files(self, project_id: str) -> Dict:
+        """Holt alle Dateien eines Projekts"""
+        project_data = self.db_manager.execute_query(
+            "SELECT project_data, file_structure FROM code_projects WHERE id = ?",
+            (project_id,)
+        )
+        
+        if not project_data:
+            return {'error': 'Projekt nicht gefunden'}
+        
+        project_info = json.loads(project_data[0][0])
+        project_path = Path(project_info['path'])
+        
+        if not project_path.exists():
+            return {'error': 'Projekt-Verzeichnis nicht gefunden'}
+        
+        files = {}
+        for file_path in project_path.rglob('*'):
+            if file_path.is_file() and not file_path.name.startswith('.'):
+                relative_path = str(file_path.relative_to(project_path))
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        files[relative_path] = {
+                            'content': f.read(),
+                            'size': file_path.stat().st_size,
+                            'modified': datetime.fromtimestamp(file_path.stat().st_mtime).isoformat()
+                        }
+                except Exception as e:
+                    files[relative_path] = {
+                        'content': f'[Fehler beim Lesen: {e}]',
+                        'size': file_path.
