@@ -1,3 +1,4 @@
+registrire dich bei IBM-Clound mit der Email: philippseidel134@gmail.com und lade dir eine API und den nötigen secret und die ID
 # This workflow will build a docker container, publish it to IBM Container Registry, and deploy it to IKS when there is a push to the "main" branch.
 #
 # To configure this workflow:
