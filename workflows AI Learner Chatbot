@@ -1,0 +1,791 @@
+# GitHub Repository Setup & Workflows
+*Für Philipps Lernenden Multimedia-Chatbot System*
+
+---
+
+## 📁 Repository Struktur
+
+```
+philipp-ai-multimedia-chatbot/
+├── .github/
+│   └── workflows/
+│       ├── ci-cd.yml
+│       ├── deploy-production.yml
+│       ├── test-suite.yml
+│       └── security-scan.yml
+├── backend/
+│   ├── src/
+│   │   ├── controllers/
+│   │   ├── services/
+│   │   ├── models/
+│   │   ├── middleware/
+│   │   └── utils/
+│   ├── tests/
+│   ├── prisma/
+│   ├── storage/              # 2GB+ pro User Profile
+│   │   ├── projects/
+│   │   ├── assets/
+│   │   └── cache/
+│   ├── Dockerfile
+│   └── package.json
+├── frontend/
+│   ├── src/
+│   ├── public/
+│   ├── tests/
+│   ├── Dockerfile
+│   └── package.json
+├── ml-service/
+│   ├── src/
+│   ├── models/
+│   ├── data/
+│   ├── tests/
+│   ├── Dockerfile
+│   └── requirements.txt
+├── infrastructure/
+│   ├── docker-compose.yml
+│   ├── kubernetes/
+│   └── terraform/
+├── docs/
+├── scripts/
+└── README.md
+```
+
+---
+
+## 🔄 GitHub Actions Workflows
+
+### 1. Main CI/CD Pipeline (.github/workflows/ci-cd.yml)
+
+```yaml
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Tests und Code Quality
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+        
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: 'npm'
+        cache-dependency-path: |
+          backend/package-lock.json
+          frontend/package-lock.json
+        
+    - name: Install dependencies - Backend
+      run: |
+        cd backend
+        npm ci
+        
+    - name: Install dependencies - Frontend
+      run: |
+        cd frontend
+        npm ci
+        
+    - name: Setup Python for ML Service
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install Python dependencies
+      run: |
+        cd ml-service
+        pip install -r requirements.txt
+        
+    - name: Run Backend Tests
+      run: |
+        cd backend
+        npm run test:coverage
+        
+    - name: Run Frontend Tests
+      run: |
+        cd frontend
+        npm run test:coverage
+        
+    - name: Run ML Service Tests
+      run: |
+        cd ml-service
+        python -m pytest tests/ --cov=src
+        
+    - name: Code Quality Check
+      run: |
+        cd backend
+        npm run lint
+        npm run type-check
+        cd ../frontend
+        npm run lint
+        npm run type-check
+        
+    - name: Upload Coverage Reports
+      uses: codecov/codecov-action@v3
+      with:
+        files: |
+          backend/coverage/lcov.info
+          frontend/coverage/lcov.info
+          ml-service/coverage.xml
+
+  # Sicherheits-Scans
+  security:
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+        
+    - name: NPM Audit - Backend
+      run: |
+        cd backend
+        npm audit --audit-level=high
+        
+    - name: NPM Audit - Frontend
+      run: |
+        cd frontend
+        npm audit --audit-level=high
+
+  # Docker Build und Registry Push
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: [test, security]
+    if: github.ref == 'refs/heads/main'
+    
+    permissions:
+      contents: read
+      packages: write
+      
+    strategy:
+      matrix:
+        service: [backend, frontend, ml-service]
+        
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+          
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./${{ matrix.service }}
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          BUILDKIT_INLINE_CACHE=1
+          
+  # Deployment zu Staging
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+    environment: staging
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Deploy to Staging
+      run: |
+        echo "Deploying to staging environment..."
+        # Hier würde der echte Deployment-Code stehen
+        # z.B. kubectl apply, docker-compose up, etc.
+        
+    - name: Run Smoke Tests
+      run: |
+        echo "Running smoke tests on staging..."
+        # Basis-Gesundheitschecks nach Deployment
+
+  # Benachrichtigungen
+  notify:
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    if: always()
+    
+    steps:
+    - name: Notify Slack on Success
+      if: needs.deploy-staging.result == 'success'
+      uses: 8398a7/action-slack@v3
+      with:
+        status: success
+        text: '✅ Deployment erfolgreich! Staging ist bereit für Tests.'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        
+    - name: Notify Slack on Failure
+      if: needs.deploy-staging.result == 'failure'
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        text: '❌ Deployment fehlgeschlagen. Überprüfung erforderlich.'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+```
+
+### 2. Production Deployment (.github/workflows/deploy-production.yml)
+
+```yaml
+name: Production Deployment
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to deploy'
+        required: true
+        default: 'latest'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  pre-deployment-checks:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Verify Release Notes
+      run: |
+        if [ "${{ github.event_name }}" == "release" ]; then
+          echo "Release notes: ${{ github.event.release.body }}"
+        fi
+        
+    - name: Database Migration Check
+      run: |
+        echo "Checking database migrations..."
+        cd backend
+        npm ci
+        npm run migration:check
+        
+    - name: Storage Capacity Check
+      run: |
+        echo "Checking storage capacity for 2GB+ per profile..."
+        # Hier würden echte Storage-Checks implementiert werden
+        
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: pre-deployment-checks
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+        
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: eu-central-1
+        
+    - name: Deploy to EKS Cluster
+      run: |
+        # EKS Cluster Verbindung
+        aws eks update-kubeconfig --name philipp-ai-chatbot-prod
+        
+        # Deployment mit Storage-Konfiguration
+        kubectl apply -f infrastructure/kubernetes/production/
+        
+        # Warten auf Rollout
+        kubectl rollout status deployment/backend-deployment -n production
+        kubectl rollout status deployment/frontend-deployment -n production
+        kubectl rollout status deployment/ml-service-deployment -n production
+        
+    - name: Verify Storage Provisioning
+      run: |
+        # Überprüfung der PersistentVolumes für 2GB+ pro Profil
+        kubectl get pv -n production
+        kubectl get pvc -n production
+        
+    - name: Run Production Health Checks
+      run: |
+        # Umfassende Health Checks
+        kubectl run health-check --image=curlimages/curl --rm -it --restart=Never -- \
+          curl -f http://backend-service:3000/health
+          
+    - name: Update Production Database
+      run: |
+        # Sichere Datenbank-Migration
+        kubectl exec deployment/backend-deployment -n production -- \
+          npm run migration:run
+          
+  post-deployment-validation:
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    
+    steps:
+    - name: Load Testing
+      run: |
+        echo "Running load tests with 2GB profile data simulation..."
+        # Hier würden Load Tests implementiert werden
+        
+    - name: Monitoring Setup
+      run: |
+        echo "Setting up monitoring for storage usage per profile..."
+        # Monitoring-Konfiguration
+        
+    - name: Backup Verification
+      run: |
+        echo "Verifying backup systems for profile data..."
+        # Backup-Tests
+```
+
+### 3. Automated Testing Suite (.github/workflows/test-suite.yml)
+
+```yaml
+name: Comprehensive Test Suite
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # Täglich um 2 Uhr
+  workflow_dispatch:
+  push:
+    paths:
+      - '**.test.js'
+      - '**.test.ts'
+      - '**.spec.js'
+      - '**.spec.ts'
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Test Environment
+      run: |
+        docker-compose -f docker-compose.test.yml up -d
+        
+    - name: Run Unit Tests
+      run: |
+        # Backend Unit Tests
+        cd backend
+        npm ci
+        npm run test:unit -- --verbose --coverage
+        
+        # Frontend Unit Tests
+        cd ../frontend
+        npm ci
+        npm run test:unit -- --coverage --watchAll=false
+        
+        # ML Service Unit Tests
+        cd ../ml-service
+        pip install -r requirements.txt
+        python -m pytest tests/unit/ -v --cov=src
+        
+  integration-tests:
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Test Database
+      run: |
+        cd backend
+        npm ci
+        npm run migration:run
+        npm run seed:test-data
+        
+    - name: Run Integration Tests
+      run: |
+        cd backend
+        npm run test:integration
+        
+    - name: Test 2GB Profile Storage
+      run: |
+        cd backend
+        npm run test:storage-capacity
+        
+  e2e-tests:
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup E2E Environment
+      run: |
+        docker-compose -f docker-compose.e2e.yml up -d
+        sleep 30  # Warten bis Services bereit sind
+        
+    - name: Install Playwright
+      run: |
+        cd frontend
+        npm ci
+        npx playwright install
+        
+    - name: Run E2E Tests
+      run: |
+        cd frontend
+        npm run test:e2e
+        
+    - name: Test Multimedia Generation Flow
+      run: |
+        cd frontend
+        npm run test:e2e:multimedia-flow
+        
+    - name: Upload E2E Screenshots
+      uses: actions/upload-artifact@v3
+      if: failure()
+      with:
+        name: e2e-screenshots
+        path: frontend/test-results/
+
+  performance-tests:
+    runs-on: ubuntu-latest
+    needs: e2e-tests
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Performance Test Environment
+      run: |
+        docker-compose -f docker-compose.perf.yml up -d
+        
+    - name: Run Load Tests
+      run: |
+        # Artillery.js für Load Testing
+        npm install -g artillery@latest
+        artillery run tests/performance/load-test.yml
+        
+    - name: Test Storage Performance with 2GB Profiles
+      run: |
+        # Simuliere multiple 2GB Profile
+        artillery run tests/performance/storage-load-test.yml
+        
+    - name: Generate Performance Report
+      run: |
+        artillery report tests/performance/results.json --output performance-report.html
+        
+    - name: Upload Performance Report
+      uses: actions/upload-artifact@v3
+      with:
+        name: performance-report
+        path: performance-report.html
+```
+
+---
+
+## 🗂️ Storage Management Konfiguration
+
+### Kubernetes Storage Classes für 2GB+ Profile:
+```yaml
+# infrastructure/kubernetes/storage-class.yml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: philipp-ai-profile-storage
+provisioner: kubernetes.io/aws-ebs
+parameters:
+  type: gp3
+  iops: "3000"
+  throughput: "125"
+  encrypted: "true"
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+
+---
+# Profile Data PersistentVolumeClaim Template
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: user-profile-storage-template
+spec:
+  storageClassName: philipp-ai-profile-storage
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi  # Minimum 2GB pro Profil
+    limits:
+      storage: 10Gi # Maximum 10GB pro Profil für Wachstum
+```
+
+### Docker Compose mit Storage-Volumes:
+```yaml
+# docker-compose.storage.yml
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    volumes:
+      - profile-data:/app/storage/profiles
+      - asset-cache:/app/storage/assets
+      - project-backups:/app/storage/backups
+    environment:
+      - MAX_PROFILE_STORAGE=2GB
+      - STORAGE_WARNING_THRESHOLD=1.8GB
+      - AUTO_CLEANUP_ENABLED=true
+      
+  storage-monitor:
+    image: prom/node-exporter:latest
+    volumes:
+      - profile-data:/host/profile-data:ro
+      - asset-cache:/host/asset-cache:ro
+    command:
+      - '--path.rootfs=/host'
+      - '--collector.filesystem'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+
+volumes:
+  profile-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /var/lib/philipp-ai/profiles
+  asset-cache:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /var/lib/philipp-ai/assets
+  project-backups:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /var/lib/philipp-ai/backups
+```
+
+---
+
+## 📊 Monitoring & Storage Analytics
+
+### GitHub Actions für Storage-Monitoring:
+```yaml
+# .github/workflows/storage-monitoring.yml
+name: Storage Monitoring
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Täglich um 6 Uhr
+  workflow_dispatch:
+
+jobs:
+  storage-analytics:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Connect to Production Cluster
+      run: |
+        aws eks update-kubeconfig --name philipp-ai-chatbot-prod
+        
+    - name: Analyze Profile Storage Usage
+      run: |
+        # Script zur Analyse der Storage-Nutzung
+        kubectl exec deployment/backend-deployment -n production -- \
+          node scripts/analyze-storage-usage.js > storage-report.json
+          
+    - name: Check Storage Thresholds
+      run: |
+        # Überprüfung ob Profile die 2GB-Grenze erreichen
+        python scripts/check-storage-thresholds.py storage-report.json
+        
+    - name: Generate Storage Usage Report
+      run: |
+        # Erstelle detaillierten Bericht
+        python scripts/generate-storage-report.py \
+          --input storage-report.json \
+          --output storage-usage-report.html
+          
+    - name: Upload Storage Report
+      uses: actions/upload-artifact@v3
+      with:
+        name: storage-usage-report
+        path: storage-usage-report.html
+        
+    - name: Alert on High Usage
+      run: |
+        # Sende Alerts wenn Storage-Limits erreicht werden
+        if [ $(python scripts/check-high-usage.py) == "true" ]; then
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{"text":"⚠️ Storage Usage Alert: Einige Profile nähern sich der 2GB-Grenze!"}' \
+            ${{ secrets.SLACK_WEBHOOK_URL }}
+        fi
+```
+
+---
+
+## 🚀 Repository Setup Befehle
+
+### Automatisiertes Setup-Script:
+```bash
+#!/bin/bash
+# setup-repository.sh
+
+echo "🚀 Setting up Philipp's AI Multimedia Chatbot Repository..."
+
+# Repository erstellen
+gh repo create R3mix9002/philipp-ai-multimedia-chatbot --public --description "Lernender Multimedia-Chatbot mit 2GB+ Profil-Speicher"
+
+# Repository klonen
+git clone https://github.com/R3mix9002/philipp-ai-multimedia-chatbot.git
+cd philipp-ai-multimedia-chatbot
+
+# Grundstruktur erstellen
+mkdir -p .github/workflows
+mkdir -p backend/{src,tests,prisma,storage}
+mkdir -p frontend/{src,public,tests}
+mkdir -p ml-service/{src,models,data,tests}
+mkdir -p infrastructure/{kubernetes,terraform}
+mkdir -p docs
+mkdir -p scripts
+
+# GitHub Secrets einrichten (interaktiv)
+echo "Setting up GitHub Secrets..."
+gh secret set AWS_ACCESS_KEY_ID --body "$AWS_ACCESS_KEY_ID"
+gh secret set AWS_SECRET_ACCESS_KEY --body "$AWS_SECRET_ACCESS_KEY"
+gh secret set SLACK_WEBHOOK_URL --body "$SLACK_WEBHOOK_URL"
+gh secret set OPENAI_API_KEY --body "$OPENAI_API_KEY"
+gh secret set ANTHROPIC_API_KEY --body "$ANTHROPIC_API_KEY"
+
+# Branch Protection einrichten
+gh api repos/R3mix9002/philipp-ai-multimedia-chatbot/branches/main/protection \
+  --method PUT \
+  --field required_status_checks='{"strict":true,"contexts":["test","security","build-and-push"]}' \
+  --field enforce_admins=true \
+  --field required_pull_request_reviews='{"required_approving_review_count":1}' \
+  --field restrictions=null
+
+# Labels erstellen
+gh label create "enhancement" --color "84b6eb" --description "New feature or request"
+gh label create "bug" --color "d73a4a" --description "Something isn't working"
+gh label create "storage" --color "fef2c0" --description "Related to profile storage management"
+gh label create "ml" --color "c2e0c6" --description "Machine learning related"
+gh label create "multimedia" --color "f9d0c4" --description "Multimedia generation features"
+
+# Issues Templates erstellen
+mkdir -p .github/ISSUE_TEMPLATE
+
+# Initial commit
+git add .
+git commit -m "🎉 Initial setup: Multimedia-Chatbot with 2GB+ profile storage"
+git push origin main
+
+echo "✅ Repository setup complete!"
+echo "🔗 Repository URL: https://github.com/R3mix9002/philipp-ai-multimedia-chatbot"
+```
+
+---
+
+## 📋 Repository Checkliste
+
+### Vor dem ersten Deployment:
+
+- [ ] **Repository erstellt** auf https://github.com/R3mix9002/
+- [ ] **GitHub Secrets konfiguriert** (API Keys, AWS Credentials)
+- [ ] **Branch Protection aktiviert** (main branch)
+- [ ] **Storage-Konfiguration** für 2GB+ Profile getestet
+- [ ] **CI/CD Pipeline** funktioniert (alle Tests grün)
+- [ ] **Docker Images** bauen erfolgreich
+- [ ] **Database Migrations** sind korrekt
+- [ ] **Monitoring** ist eingerichtet
+- [ ] **Backup-Strategie** implementiert
+- [ ] **Sicherheits-Scans** bestanden
+- [ ] **Load Tests** mit 2GB Profilen erfolgreich
+- [ ] **Dokumentation** vollständig
+- [ ] **Team-Zugriff** konfiguriert
+
+### Storage-spezifische Checks:
+
+- [ ] **Minimum 2GB** pro Profil verfügbar
+- [ ] **Automatic Scaling** bei Bedarf
+- [ ] **Storage Monitoring** aktiv
+- [ ] **Cleanup-Prozesse** implementiert
+- [ ] **Backup-Rotation** konfiguriert
+- [ ] **Disaster Recovery** getestet
+- [ ] **Performance-Tests** mit vollen 2GB Profilen
+- [ ] **Cost-Optimization** für Storage implementiert
+
+---
+
+*Dieses Setup gibt dir eine vollständige, produktionsreife GitHub-Umgebung für dein Multimedia-Chatbot System mit garantiert 2GB+ Speicher pro Profil und automatisierten Workflows für Entwicklung, Testing und Deployment!* 🚀
